@@ -24,6 +24,7 @@
 即时模式会将选中的运行中应用置前，并模拟缩放快捷键。支持 QQ、微信、Codex、Claude、Notion，也可在设置中添加自定义应用。
 
 - 每个内置应用可选择 Desktop Mode 发送 `⌘+` 的次数（1–6 次）
+- Terminal 使用即时快捷键：Desktop Mode `⌘+`，Laptop Mode `⌘0`；未运行时自动跳过
 - 自定义应用可填写名称、Bundle ID、Desktop Mode 放大次数，以及 Laptop Mode 使用 `⌘0` 重置或 `⌘-` 缩小
 - 首次使用需要在“系统设置 → 隐私与安全性 → 辅助功能”中授权 MacScaleManager
 

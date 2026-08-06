@@ -17,6 +17,7 @@ struct SettingsView: View {
         Form {
             Section("Managed targets") {
                 Toggle("VS Code", isOn: $manager.preferences.manageVSCode)
+                Toggle("Terminal.app 默认字体", isOn: $manager.preferences.manageTerminal)
                 Toggle("Google Chrome", isOn: $manager.preferences.manageChrome)
                 Toggle("Microsoft Edge", isOn: $manager.preferences.manageEdge)
                 Toggle("Dock icon size", isOn: $manager.preferences.manageDock)
@@ -35,6 +36,7 @@ struct SettingsView: View {
                 Toggle("Codex", isOn: $manager.preferences.immediateCodex)
                 Toggle("Claude", isOn: $manager.preferences.immediateClaude)
                 Toggle("Notion", isOn: $manager.preferences.immediateNotion)
+                Toggle("Terminal", isOn: $manager.preferences.immediateTerminal)
                 ForEach(ImmediateTarget.allCases) { target in
                     Stepper("\(target.title) Desktop Mode：\(manager.preferences.zoomSteps(for: target)) 次 ⌘+", value: Binding(get: { manager.preferences.zoomSteps(for: target) }, set: { manager.preferences.setZoomSteps($0, for: target) }), in: 1...6)
                 }

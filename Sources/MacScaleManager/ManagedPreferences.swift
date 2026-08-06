@@ -22,6 +22,7 @@ enum PreferenceError: LocalizedError {
 @MainActor
 final class ManagedPreferences: ObservableObject {
     @Published var manageVSCode: Bool { didSet { store.set(manageVSCode, forKey: "manageVSCode") } }
+    @Published var manageTerminal: Bool { didSet { store.set(manageTerminal, forKey: "manageTerminal") } }
     @Published var manageChrome: Bool { didSet { store.set(manageChrome, forKey: "manageChrome") } }
     @Published var manageEdge: Bool { didSet { store.set(manageEdge, forKey: "manageEdge") } }
     @Published var manageDock: Bool { didSet { store.set(manageDock, forKey: "manageDock") } }
@@ -36,6 +37,7 @@ final class ManagedPreferences: ObservableObject {
     @Published var immediateCodex: Bool { didSet { store.set(immediateCodex, forKey: "immediateCodex") } }
     @Published var immediateClaude: Bool { didSet { store.set(immediateClaude, forKey: "immediateClaude") } }
     @Published var immediateNotion: Bool { didSet { store.set(immediateNotion, forKey: "immediateNotion") } }
+     var immediateTerminal: Bool { didSet { store.set(immediateTerminal, forKey: "immediateTerminal") } }
      var immediateZoomSteps: [String: Int] { didSet { saveImmediateZoomSteps() } }
     @Published var customProfile: ScaleProfile { didSet { saveCustomProfile() } }
     @Published var customImmediateApps: [CustomImmediateApp] { didSet { saveCustomImmediateApps() } }
@@ -46,6 +48,7 @@ final class ManagedPreferences: ObservableObject {
 
     init() {
         manageVSCode = store.object(forKey: "manageVSCode") as? Bool ?? true
+        manageTerminal = store.object(forKey: "manageTerminal") as? Bool ?? false
         manageChrome = store.object(forKey: "manageChrome") as? Bool ?? true
         manageEdge = store.object(forKey: "manageEdge") as? Bool ?? false
         manageDock = store.object(forKey: "manageDock") as? Bool ?? false
@@ -60,8 +63,9 @@ final class ManagedPreferences: ObservableObject {
         immediateCodex = store.object(forKey: "immediateCodex") as? Bool ?? true
         immediateClaude = store.object(forKey: "immediateClaude") as? Bool ?? true
         immediateNotion = store.object(forKey: "immediateNotion") as? Bool ?? true
+        immediateTerminal = store.object(forKey: "immediateTerminal") as? Bool ?? true
         let savedZoomSteps = store.dictionary(forKey: "immediateZoomSteps") as? [String: Int] ?? [:]
-        immediateZoomSteps = ["qq": 2, "wechat": 2, "codex": 3, "claude": 2, "notion": 2].merging(savedZoomSteps) { _, saved in saved }
+        immediateZoomSteps = ["qq": 2, "wechat": 2, "codex": 3, "claude": 2, "notion": 2, "terminal": 2].merging(savedZoomSteps) { _, saved in saved }
         if let data = store.data(forKey: "customProfile"), let profile = try? JSONDecoder().decode(ScaleProfile.self, from: data) {
             customProfile = profile
         } else { customProfile = .desktop }
@@ -72,7 +76,7 @@ final class ManagedPreferences: ObservableObject {
 
     var immediateTargets: [ImmediateTarget] {
         [immediateQQ ? .qq : nil, immediateWeChat ? .wechat : nil, immediateCodex ? .codex : nil,
-         immediateClaude ? .claude : nil, immediateNotion ? .notion : nil].compactMap { $0 }
+         immediateClaude ? .claude : nil, immediateNotion ? .notion : nil, immediateTerminal ? .terminal : nil].compactMap { $0 }
     }
 
     func zoomSteps(for target: ImmediateTarget) -> Int { max(1, immediateZoomSteps[target.rawValue] ?? (target == .codex ? 3 : 2)) }
@@ -84,6 +88,17 @@ final class ManagedPreferences: ObservableObject {
     private func saveCustomImmediateApps() {
         guard let data = try? JSONEncoder().encode(customImmediateApps) else { return }
         store.set(data, forKey: "customImmediateApps")
+    }
+
+    func applyTerminalFont(size: Double) throws {
+        let key = "terminalOriginalFontSize"
+        if store.object(forKey: key) == nil, let current = TerminalController.currentFontSize() { store.set(current, forKey: key) }
+        try TerminalController.setDefaultFontSize(size)
+    }
+
+    func restoreTerminalFont() throws {
+        guard let size = store.object(forKey: "terminalOriginalFontSize") as? Double else { return }
+        try TerminalController.setDefaultFontSize(size)
     }
 
     func apply(profile: ScaleProfile, captureBackups: Bool = true) throws {

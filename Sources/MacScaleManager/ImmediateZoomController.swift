@@ -2,18 +2,18 @@ import AppKit
 import ApplicationServices
 
 enum ImmediateTarget: String, CaseIterable, Identifiable {
-    case qq, wechat, codex, claude, notion
+    case qq, wechat, codex, claude, notion, terminal
 
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .qq: "QQ"; case .wechat: "微信"; case .codex: "Codex"; case .claude: "Claude"; case .notion: "Notion"
+        case .qq: "QQ"; case .wechat: "微信"; case .codex: "Codex"; case .claude: "Claude"; case .notion: "Notion"; case .terminal: "Terminal"
         }
     }
     var bundleIdentifier: String {
         switch self {
         case .qq: "com.tencent.qq"; case .wechat: "com.tencent.xinWeChat"; case .codex: "com.openai.codex"
-        case .claude: "com.anthropic.claude"; case .notion: "notion.id"
+        case .claude: "com.anthropic.claude"; case .notion: "notion.id"; case .terminal: "com.apple.Terminal"
         }
     }
 }
@@ -78,16 +78,13 @@ struct ImmediateZoomController {
 
     private static func applyShortcut(for target: ImmediateTarget, application: NSRunningApplication, mode: ScaleMode, desktopZoomSteps: Int) {
         if mode == .laptop {
-            // QQ does not implement Cmd+0. Undo the Desktop two-step increase
-            // with two Cmd-minus events; other Electron targets support reset.
             if target == .qq {
-                postShortcut(keyCode: 0x1B)
-                postShortcut(keyCode: 0x1B)
+                for _ in 0..<2 { postShortcut(keyCode: 0x1B) }
             } else {
                 postShortcut(keyCode: 0x1D)
             }
         } else {
-            let interval: TimeInterval = target == .codex ? 0.28 : 0.12
+            let interval: TimeInterval = target == .codex ? 0.28 : 0.25
             for _ in 0..<min(max(desktopZoomSteps, 1), 6) { postShortcut(keyCode: 0x18, settleInterval: interval) }
         }
     }

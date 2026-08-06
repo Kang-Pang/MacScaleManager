@@ -41,8 +41,13 @@ final class ScaleManager: ObservableObject {
         // Persisting the selected mode also makes a launch after an app update or
         // restart restore the intended workspace configuration.
         do {
-            if currentMode == .laptop { try preferences.restoreOrApplyLaptopDefaults() }
-            else { try preferences.apply(profile: profile(for: currentMode)) }
+            if currentMode == .laptop {
+                try preferences.restoreOrApplyLaptopDefaults()
+                if preferences.manageTerminal { try? preferences.restoreTerminalFont() }
+            } else {
+                try preferences.apply(profile: profile(for: currentMode))
+                if preferences.manageTerminal { try? preferences.applyTerminalFont(size: profile(for: currentMode).terminalFontSize) }
+            }
         } catch { lastError = error.localizedDescription }
         hotKeyController = GlobalHotKeyController { [weak self] in
             self?.enableBuiltInDisplay()
@@ -63,8 +68,10 @@ final class ScaleManager: ObservableObject {
             // are more trustworthy than a guessed macOS/IDE "default".
             if mode == .laptop {
                 try preferences.restoreOrApplyLaptopDefaults()
+                if preferences.manageTerminal { try? preferences.restoreTerminalFont() }
             } else {
                 try preferences.apply(profile: profile(for: mode))
+                if preferences.manageTerminal { try? preferences.applyTerminalFont(size: profile(for: mode).terminalFontSize) }
             }
             currentMode = mode
             UserDefaults.standard.set(mode.rawValue, forKey: "currentMode")
@@ -75,6 +82,7 @@ final class ScaleManager: ObservableObject {
     func restoreDefaults() {
         do {
             try preferences.restoreOrApplyLaptopDefaults()
+            if preferences.manageTerminal { try? preferences.restoreTerminalFont() }
             currentMode = .laptop
             UserDefaults.standard.set(ScaleMode.laptop.rawValue, forKey: "currentMode")
             lastError = nil
