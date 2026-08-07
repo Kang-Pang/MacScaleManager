@@ -4,13 +4,14 @@
 
 ## 功能
 
-- Desktop、Laptop 与 Custom 三种场景模式
+- Desktop、Laptop 与 Custom 三种场景模式；Desktop 与 Custom 的参数可在设置页按应用编辑并保存
 - VS Code 的编辑器字体、集成终端字体与 UI 缩放
-- Chrome、Edge 各 Profile 的默认页面缩放
+- Chrome、Edge 各 Profile 的默认页面缩放；Edge 运行时可改用即时快捷键缩放
 - 可选的 Dock 图标大小和鼠标指针大小
 - 即时快捷键缩放：对已打开的 QQ、微信、Codex、Claude、Notion 与 Terminal 发送 `⌘+`、`⌘-` 或 `⌘0`
 - 每个即时应用可分别设置 Desktop 的放大次数和 Laptop 的恢复方式；自定义应用支持从已安装应用列表选择 Bundle ID
 - 内置显示器开关与 `Control–Option–I` 重新启用快捷键
+- 模式切换失败时显示系统警告和菜单内高对比错误原因
 - 仅在打开设置或点击刷新时扫描已安装应用；没有常驻扫描或轮询
 
 ## 即时模式
@@ -33,4 +34,4 @@ swift build -c release
 
 Safari、Finder 与系统文字大小没有可靠的受支持按场景 API。本项目不修改显示器分辨率、不模拟 HiDPI，也不修改 WindowServer。
 
-对 Chrome、Edge、VS Code 等配置文件的调整会先保存原始值；恢复默认模式时会写回原有配置。切换这些配置时，建议先退出对应应用，避免应用退出时覆盖文件。
+对 Chrome、Edge、VS Code 等配置文件的调整会先保存原始值；Laptop Mode 会恢复这些原始值。配置文件应用运行时可能覆盖文件，因此切换会被阻止并显示原因。对于已打开的 Edge，可关闭其配置文件模式并从“自定义即时应用”添加 Edge，通过快捷键实时缩放。

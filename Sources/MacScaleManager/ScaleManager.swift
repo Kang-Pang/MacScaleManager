@@ -56,7 +56,7 @@ final class ScaleManager: ObservableObject {
 
     func profile(for mode: ScaleMode) -> ScaleProfile {
         if mode == .custom { return preferences.customProfile }
-        return mode == .desktop ? .desktop : .laptop
+        return mode == .desktop ? preferences.desktopProfile : .laptop
     }
 
     func apply(_ mode: ScaleMode) {
@@ -76,7 +76,7 @@ final class ScaleManager: ObservableObject {
             currentMode = mode
             UserDefaults.standard.set(mode.rawValue, forKey: "currentMode")
             lastError = nil
-        } catch { lastError = error.localizedDescription }
+        } catch { presentModeFailure(error.localizedDescription) }
     }
 
     func restoreDefaults() {
@@ -86,7 +86,18 @@ final class ScaleManager: ObservableObject {
             currentMode = .laptop
             UserDefaults.standard.set(ScaleMode.laptop.rawValue, forKey: "currentMode")
             lastError = nil
-        } catch { lastError = error.localizedDescription }
+        } catch { presentModeFailure(error.localizedDescription) }
+    }
+
+    private func presentModeFailure(_ message: String) {
+        lastError = message
+        let alert = NSAlert()
+        alert.messageText = "模式切换失败"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     func enableBuiltInDisplay() {

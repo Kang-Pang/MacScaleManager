@@ -36,6 +36,15 @@ private struct MenuContent: View {
         Button { manager.apply(.custom) } label: {
             Label("Custom Mode", systemImage: manager.currentMode == .custom ? "checkmark.circle.fill" : "circle")
         }
+        if let error = manager.lastError {
+            Text("切换失败：\(error)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .systemRed))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+        }
         if let result = manager.lastImmediateResult {
             Text(result)
                 .font(.caption)

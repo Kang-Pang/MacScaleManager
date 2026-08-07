@@ -10,10 +10,12 @@ enum PreferenceError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unreadableFile(let url): "无法读取配置文件：\(url.path)"
-        case .invalidJSON(let url): "配置文件不是有效 JSON：\(url.path)"
-        case .systemCommandFailed(let message): message
-        case .applicationRunning(let name): "请先完全退出 \(name) 后再切换模式；运行中的浏览器会覆盖其配置文件。"
+        case .unreadableFile(let url): return "无法读取配置文件：\(url.path)"
+        case .invalidJSON(let url): return "配置文件不是有效 JSON：\(url.path)"
+        case .systemCommandFailed(let message): return message
+        case .applicationRunning(let name):
+            if name == "Microsoft Edge" { return "无法切换：Microsoft Edge 正在运行。请退出 Edge 后重试，或关闭 Edge 的配置文件模式并使用即时模式。" }
+            return "无法切换：\(name) 正在运行。请完全退出后重试；运行中的应用可能覆盖其配置文件。"
         }
     }
 }
@@ -40,6 +42,7 @@ final class ManagedPreferences: ObservableObject {
     @Published var immediateTerminal: Bool { didSet { store.set(immediateTerminal, forKey: "immediateTerminal") } }
     @Published var immediateZoomSteps: [String: Int] { didSet { saveImmediateZoomSteps() } }
     @Published var immediateLaptopActions: [String: String] { didSet { store.set(immediateLaptopActions, forKey: "immediateLaptopActions") } }
+    @Published var desktopProfile: ScaleProfile { didSet { saveDesktopProfile() } }
     @Published var customProfile: ScaleProfile { didSet { saveCustomProfile() } }
     @Published var customImmediateApps: [CustomImmediateApp] { didSet { saveCustomImmediateApps() } }
 
@@ -69,6 +72,9 @@ final class ManagedPreferences: ObservableObject {
         immediateZoomSteps = ["qq": 2, "wechat": 2, "codex": 3, "claude": 2, "notion": 2, "terminal": 2].merging(savedZoomSteps) { _, saved in saved }
         let savedActions = store.dictionary(forKey: "immediateLaptopActions") as? [String: String] ?? [:]
         immediateLaptopActions = ["qq": "zoomOut", "wechat": "reset", "codex": "reset", "claude": "reset", "notion": "reset", "terminal": "reset"].merging(savedActions) { _, saved in saved }
+        if let data = store.data(forKey: "desktopProfile"), let profile = try? JSONDecoder().decode(ScaleProfile.self, from: data) {
+            desktopProfile = profile
+        } else { desktopProfile = .desktop }
         if let data = store.data(forKey: "customProfile"), let profile = try? JSONDecoder().decode(ScaleProfile.self, from: data) {
             customProfile = profile
         } else { customProfile = .desktop }
@@ -336,6 +342,7 @@ final class ManagedPreferences: ObservableObject {
         return result
     }
     private func saveBackups(_ backups: [String: BackupEntry]) { store.set(try? JSONEncoder().encode(backups), forKey: backupKey) }
+    private func saveDesktopProfile() { store.set(try? JSONEncoder().encode(desktopProfile), forKey: "desktopProfile") }
     private func saveCustomProfile() { store.set(try? JSONEncoder().encode(customProfile), forKey: "customProfile") }
 }
 
