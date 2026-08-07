@@ -6,14 +6,41 @@ struct MacScaleManagerApp: App {
     @StateObject private var manager = ScaleManager()
 
     var body: some Scene {
-        MenuBarExtra("MacScaleManager", systemImage: manager.currentMode.symbolName) {
+        MenuBarExtra {
             MenuContent(manager: manager)
+        } label: {
+            Image(systemName: manager.accessibilityTrusted ? manager.currentMode.symbolName : "exclamationmark.triangle.fill")
+                .symbolRenderingMode(.multicolor)
+                .foregroundStyle(manager.accessibilityTrusted ? (manager.currentMode == .desktop ? Color.blue : Color.gray) : Color.orange)
         }
         .menuBarExtraStyle(.menu)
+    }
+}
 
-        Settings {
-            SettingsView(manager: manager)
-        }
+@MainActor
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    private let onClose: () -> Void
+
+    init(manager: ScaleManager, onClose: @escaping () -> Void) {
+        self.onClose = onClose
+        let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(manager: manager)))
+        window.title = "MacScaleManager Settings"
+        window.setContentSize(NSSize(width: 580, height: 720))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        window.delegate = self
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func windowWillClose(_ notification: Notification) {
+        // NSApplication may keep a closed window alive briefly. Detach the hosted
+        // SwiftUI hierarchy immediately so Settings and its app list are not kept
+        // resident by that cache.
+        window?.contentViewController = nil
+        window?.delegate = nil
+        onClose()
     }
 }
 
@@ -26,25 +53,22 @@ private struct MenuContent: View {
             .onAppear { manager.refreshDisplayStatus() }
         Text("当前模式：\(manager.currentMode.title)")
             .foregroundStyle(.secondary)
+        Text(manager.preflightSummary(for: manager.currentMode == .desktop ? .laptop : .desktop))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        if let progress = manager.preflightProgress {
+            Text(progress)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.orange)
+        }
         Divider()
-        Button { manager.apply(.laptop) } label: {
+        Button { manager.requestApply(.laptop) } label: {
             Label("Laptop Mode", systemImage: manager.currentMode == .laptop ? "checkmark.circle.fill" : "circle")
         }
-        Button { manager.apply(.desktop) } label: {
+        Button { manager.requestApply(.desktop) } label: {
             Label("Desktop Mode", systemImage: manager.currentMode == .desktop ? "checkmark.circle.fill" : "circle")
         }
-        Button { manager.apply(.custom) } label: {
-            Label("Custom Mode", systemImage: manager.currentMode == .custom ? "checkmark.circle.fill" : "circle")
-        }
-        if let error = manager.lastError {
-            Text("切换失败：\(error)")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(nsColor: .systemRed))
-                .clipShape(RoundedRectangle(cornerRadius: 5))
-        }
+        Button("只同步当前前台应用") { manager.syncFrontmostImmediateApp() }
         if let result = manager.lastImmediateResult {
             Text(result)
                 .font(.caption)
@@ -57,8 +81,7 @@ private struct MenuContent: View {
             manager.toggleBuiltInDisplay()
         }
         Divider()
-        SettingsLink { Text("Settings…") }
-        Button("Restore Default") { manager.restoreDefaults() }
+        Button("Settings…") { manager.openSettings() }
         Divider()
         Button("Quit") { NSApplication.shared.terminate(nil) }
     }

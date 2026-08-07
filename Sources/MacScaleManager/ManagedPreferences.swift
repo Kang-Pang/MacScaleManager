@@ -2,17 +2,140 @@ import AppKit
 import Foundation
 import Combine
 
+struct ExternalAdapterDocument: Codable {
+    var adapters: [ExternalJSONAdapter]
+    var immediateAdapters: [ExternalImmediateAdapter]?
+    var managedApplications: [String: Bool]?
+    var desktopProfile: ScaleProfile?
+    var laptopProfile: ScaleProfile?
+}
+
+struct ExternalImmediateAdapter: Codable, Identifiable {
+    var enabled: Bool?
+    var name: String
+    var bundleIdentifier: String
+    var desktopZoomSteps: Int?
+    var laptopAction: CustomLaptopAction?
+    var applyOnLaunch: Bool?
+    var resetBeforeDesktop: Bool?
+    var launchDelaySeconds: Double?
+    var shortcutIntervalSeconds: Double?
+    var id: String { bundleIdentifier }
+    var shouldApplyOnLaunch: Bool { applyOnLaunch ?? true }
+    var isEnabled: Bool { enabled ?? true }
+    var shouldResetBeforeDesktop: Bool { resetBeforeDesktop ?? (bundleIdentifier != "com.tencent.qq") }
+    var desktopLaunchDelay: Double { min(max(launchDelaySeconds ?? 2.0, 0.5), 10.0) }
+    var shortcutInterval: Double { min(max(shortcutIntervalSeconds ?? (bundleIdentifier == "com.openai.codex" ? 0.28 : 0.25), 0.1), 1.0) }
+    var summary: String { "\(desktopZoomSteps ?? 2) 次 ⌘+ · 启动后 \(String(format: "%.1f", desktopLaunchDelay)) 秒同步" }
+    func asImmediateApp() -> CustomImmediateApp {
+        CustomImmediateApp(name: name, bundleIdentifier: bundleIdentifier, desktopZoomSteps: min(max(desktopZoomSteps ?? 2, 1), 6), laptopAction: laptopAction ?? .reset, resetBeforeDesktop: shouldResetBeforeDesktop, launchDelaySeconds: desktopLaunchDelay, shortcutIntervalSeconds: shortcutInterval)
+    }
+}
+
+struct ExternalJSONAdapter: Codable {
+    let enabled: Bool?
+    let name: String
+    let bundleIdentifier: String?
+    let relativePath: String
+    let requiresQuit: Bool?
+    let settings: [ExternalJSONSetting]
+    var isEnabled: Bool { enabled ?? true }
+    var mustQuit: Bool { requiresQuit ?? true }
+    func configurationURL() throws -> URL {
+        guard !relativePath.hasPrefix("/"), !relativePath.contains("..") else {
+            throw PreferenceError.externalAdapterConfig(name + " 的 relativePath 必须是主目录下的相对路径")
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appending(path: relativePath)
+    }
+}
+
+struct ExternalJSONSetting: Codable {
+    let path: [String]
+    let profileValue: ExternalProfileValue
+}
+
+enum ExternalProfileValue: String, Codable {
+    case editorFontSize, terminalFontSize, vscodeZoom, browserZoomPercent, chromiumZoomLevel, dockSize, cursorSize
+    func resolve(_ profile: ScaleProfile) -> Any {
+        switch self {
+        case .editorFontSize: return profile.editorFontSize
+        case .terminalFontSize: return profile.terminalFontSize
+        case .vscodeZoom: return profile.vscodeZoom
+        case .browserZoomPercent: return profile.browserZoomPercent
+        case .chromiumZoomLevel: return log(Double(profile.browserZoomPercent) / 100.0) / log(1.2)
+        case .dockSize: return profile.dockSize
+        case .cursorSize: return profile.cursorSize
+        }
+    }
+}
+
+private enum ExternalAdapterConfiguration {
+    static let url: URL = {
+        let executablePath = CommandLine.arguments[0]
+        if executablePath.contains("/MacScaleManager.app/") {
+            var releaseDirectory = URL(fileURLWithPath: executablePath)
+            for _ in 0..<4 { releaseDirectory.deleteLastPathComponent() }
+            return releaseDirectory.appending(path: "config/app-adapters.json")
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appending(path: "Applications/MacScaleManager/source/config/app-adapters.json")
+    }()
+    static func save(_ document: ExternalAdapterDocument) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(document)
+        try data.write(to: url, options: .atomic)
+    }
+
+    static func load() throws -> ExternalAdapterDocument {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "{\n  \"adapters\" : []\n}\n".write(to: url, atomically: true, encoding: .utf8)
+        }
+        do { return try JSONDecoder().decode(ExternalAdapterDocument.self, from: Data(contentsOf: url)) }
+        catch { throw PreferenceError.externalAdapterConfig("无法读取 app-adapters.json：" + error.localizedDescription) }
+    }
+}
+
+enum ConfigurationParameterKind { case vscode, browser, terminal, dock, cursor, none }
+
+struct ConfigurationItem: Identifiable {
+    let id: String
+    let title: String
+    let kind: ConfigurationParameterKind
+}
+
+struct BlockingApplication: Identifiable {
+    let name: String
+    let application: NSRunningApplication
+    var id: String { "\(application.processIdentifier)-\(application.bundleIdentifier ?? name)" }
+}
+
+private let configurationItemDefinitions: [String: ConfigurationItem] = [
+    "vscode": ConfigurationItem(id: "vscode", title: "VS Code", kind: .vscode),
+    "terminal": ConfigurationItem(id: "terminal", title: "Terminal.app", kind: .terminal),
+    "chrome": ConfigurationItem(id: "chrome", title: "Google Chrome", kind: .browser),
+    "edge": ConfigurationItem(id: "edge", title: "Microsoft Edge", kind: .browser),
+    "zotero": ConfigurationItem(id: "zotero", title: "Zotero", kind: .browser),
+    "notion": ConfigurationItem(id: "notion", title: "Notion", kind: .browser),
+    "claude": ConfigurationItem(id: "claude", title: "Claude", kind: .browser),
+    "codex": ConfigurationItem(id: "codex", title: "Codex", kind: .browser),
+    "dock": ConfigurationItem(id: "dock", title: "Dock", kind: .dock),
+    "cursor": ConfigurationItem(id: "cursor", title: "鼠标指针", kind: .cursor)
+]
+
 enum PreferenceError: LocalizedError {
     case unreadableFile(URL)
     case invalidJSON(URL)
     case systemCommandFailed(String)
     case applicationRunning(String)
+    case externalAdapterConfig(String)
 
     var errorDescription: String? {
         switch self {
         case .unreadableFile(let url): return "无法读取配置文件：\(url.path)"
         case .invalidJSON(let url): return "配置文件不是有效 JSON：\(url.path)"
         case .systemCommandFailed(let message): return message
+        case .externalAdapterConfig(let message): return message
         case .applicationRunning(let name):
             if name == "Microsoft Edge" { return "无法切换：Microsoft Edge 正在运行。请退出 Edge 后重试，或关闭 Edge 的配置文件模式并使用即时模式。" }
             return "无法切换：\(name) 正在运行。请完全退出后重试；运行中的应用可能覆盖其配置文件。"
@@ -43,12 +166,18 @@ final class ManagedPreferences: ObservableObject {
     @Published var immediateZoomSteps: [String: Int] { didSet { saveImmediateZoomSteps() } }
     @Published var immediateLaptopActions: [String: String] { didSet { store.set(immediateLaptopActions, forKey: "immediateLaptopActions") } }
     @Published var desktopProfile: ScaleProfile { didSet { saveDesktopProfile() } }
+    @Published var laptopProfile: ScaleProfile { didSet { saveLaptopProfile() } }
     @Published var customProfile: ScaleProfile { didSet { saveCustomProfile() } }
     @Published var customImmediateApps: [CustomImmediateApp] { didSet { saveCustomImmediateApps() } }
+    @Published private(set) var managedApplicationConfig: [String: Bool] = [:]
+    @Published private(set) var configuredImmediateAdapters: [ExternalImmediateAdapter] = []
+    @Published private(set) var adapterConfigurationError: String?
+    @Published private(set) var adapterValidationResult: String?
 
     private let store = UserDefaults.standard
     private let backupKey = "managedPreferenceBackupsV1"
     private let baselineKey = "hasEstablishedLaptopBaselineV1"
+    private var isReloadingAdapterConfiguration = false
 
     init() {
         manageVSCode = store.object(forKey: "manageVSCode") as? Bool ?? true
@@ -75,12 +204,239 @@ final class ManagedPreferences: ObservableObject {
         if let data = store.data(forKey: "desktopProfile"), let profile = try? JSONDecoder().decode(ScaleProfile.self, from: data) {
             desktopProfile = profile
         } else { desktopProfile = .desktop }
-        if let data = store.data(forKey: "customProfile"), let profile = try? JSONDecoder().decode(ScaleProfile.self, from: data) {
-            customProfile = profile
-        } else { customProfile = .desktop }
-        if let data = store.data(forKey: "customImmediateApps"), let apps = try? JSONDecoder().decode([CustomImmediateApp].self, from: data) {
-            customImmediateApps = apps
-        } else { customImmediateApps = [] }
+        if let data = store.data(forKey: "laptopProfile"), let profile = try? JSONDecoder().decode(ScaleProfile.self, from: data) {
+            laptopProfile = profile
+        } else { laptopProfile = .laptop }
+        customProfile = .desktop
+        customImmediateApps = []
+        migrateLegacyCustomImmediateApps()
+        reloadAdapterConfiguration()
+        persistProfilesIfNeeded()
+    }
+
+    var configurationItems: [ConfigurationItem] {
+        managedApplicationConfig.keys.sorted().map { key in
+            configurationItemDefinitions[key] ?? ConfigurationItem(id: key, title: key, kind: .none)
+        }
+    }
+
+    func isManagedApplicationEnabled(_ key: String) -> Bool { managedApplicationConfig[key] ?? false }
+
+    func setManagedApplicationEnabled(_ enabled: Bool, key: String) {
+        updateAdapterConfiguration { document in
+            var applications = document.managedApplications ?? [:]
+            applications[key] = enabled
+            document.managedApplications = applications
+        }
+    }
+
+    /// Returns only apps that would make a configuration-file profile change unsafe.
+    /// Unopened apps and immediate-shortcut targets intentionally do not appear here.
+    func blockingApplicationsForProfileChange() -> [BlockingApplication] {
+        guard let document = try? ExternalAdapterConfiguration.load() else { return [] }
+        let configured = document.managedApplications ?? [:]
+        let candidates: [(String, String, Bool)] = [
+            ("VS Code", "com.microsoft.VSCode", configured["vscode"] ?? manageVSCode),
+            ("Google Chrome", "com.google.Chrome", configured["chrome"] ?? manageChrome),
+            ("Microsoft Edge", "com.microsoft.edgemac", configured["edge"] ?? manageEdge),
+            ("Zotero", "org.zotero.zotero", configured["zotero"] ?? manageZotero),
+            ("Notion", "notion.id", configured["notion"] ?? manageNotion),
+            ("Claude", "com.anthropic.claude", configured["claude"] ?? manageClaude),
+            ("Codex", "com.openai.codex", configured["codex"] ?? manageCodex)
+        ]
+        var result: [BlockingApplication] = []
+        var seen = Set<String>()
+        for (name, bundleID, enabled) in candidates where enabled && seen.insert(bundleID).inserted {
+            if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) {
+                result.append(BlockingApplication(name: name, application: app))
+            }
+        }
+        for adapter in document.adapters where adapter.isEnabled && adapter.mustQuit {
+            guard let bundleID = adapter.bundleIdentifier, seen.insert(bundleID).inserted,
+                  let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) else { continue }
+            result.append(BlockingApplication(name: adapter.name, application: app))
+        }
+        return result
+    }
+
+    func addConfiguredImmediateAdapter(name: String, bundleIdentifier: String) {
+        guard !name.isEmpty, !bundleIdentifier.isEmpty else { return }
+        updateAdapterConfiguration { document in
+            var adapters = document.immediateAdapters ?? []
+            guard !adapters.contains(where: { $0.bundleIdentifier == bundleIdentifier }) else { return }
+            adapters.append(ExternalImmediateAdapter(enabled: true, name: name, bundleIdentifier: bundleIdentifier, desktopZoomSteps: 2, laptopAction: .reset, applyOnLaunch: true, resetBeforeDesktop: true, launchDelaySeconds: 2.0))
+            document.immediateAdapters = adapters
+        }
+    }
+
+    private func migrateLegacyCustomImmediateApps() {
+        guard let data = store.data(forKey: "customImmediateApps"), let apps = try? JSONDecoder().decode([CustomImmediateApp].self, from: data) else { return }
+        updateAdapterConfiguration { document in
+            var adapters = document.immediateAdapters ?? []
+            for app in apps where !adapters.contains(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+                adapters.append(ExternalImmediateAdapter(enabled: true, name: app.name, bundleIdentifier: app.bundleIdentifier, desktopZoomSteps: app.desktopZoomSteps, laptopAction: app.laptopAction, applyOnLaunch: true, resetBeforeDesktop: app.resetBeforeDesktop, launchDelaySeconds: app.launchDelaySeconds))
+            }
+            document.immediateAdapters = adapters
+        }
+        store.removeObject(forKey: "customImmediateApps")
+        store.removeObject(forKey: "customProfile")
+    }
+
+    func deleteConfiguredImmediateAdapter(bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters?.removeAll { $0.bundleIdentifier == bundleIdentifier }
+        }
+    }
+
+    func setConfiguredImmediateEnabled(_ enabled: Bool, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.enabled = enabled; return updated
+            }
+        }
+    }
+
+    func setConfiguredImmediateZoomSteps(_ steps: Int, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.desktopZoomSteps = min(max(steps, 1), 6); return updated
+            }
+        }
+    }
+
+    func setConfiguredImmediateApplyOnLaunch(_ enabled: Bool, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.applyOnLaunch = enabled; return updated
+            }
+        }
+    }
+
+    func setConfiguredImmediateShortcutInterval(_ seconds: Double, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.shortcutIntervalSeconds = min(max(seconds, 0.1), 1.0); return updated
+            }
+        }
+    }
+
+    func setConfiguredImmediateLaunchDelay(_ seconds: Double, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.launchDelaySeconds = min(max(seconds, 0.5), 10.0); return updated
+            }
+        }
+    }
+
+    func setConfiguredImmediateResetBeforeDesktop(_ enabled: Bool, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.resetBeforeDesktop = enabled; return updated
+            }
+        }
+    }
+
+    func configuredDesktopLaunchApp(bundleIdentifier: String) throws -> CustomImmediateApp? {
+        try ExternalAdapterConfiguration.load().immediateAdapters?
+            .first { $0.bundleIdentifier == bundleIdentifier && $0.isEnabled && $0.shouldApplyOnLaunch }?
+            .asImmediateApp()
+    }
+
+    func configuredImmediateApp(bundleIdentifier: String) throws -> CustomImmediateApp? {
+        try ExternalAdapterConfiguration.load().immediateAdapters?
+            .first { $0.bundleIdentifier == bundleIdentifier && $0.isEnabled }?
+            .asImmediateApp()
+    }
+
+    func setConfiguredImmediateLaptopAction(_ action: CustomLaptopAction, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.laptopAction = action; return updated
+            }
+        }
+    }
+
+    func reloadAdapterConfiguration() {
+        do {
+            let document = try ExternalAdapterConfiguration.load()
+            isReloadingAdapterConfiguration = true
+            if let profile = document.desktopProfile { desktopProfile = profile }
+            if let profile = document.laptopProfile { laptopProfile = profile }
+            isReloadingAdapterConfiguration = false
+            managedApplicationConfig = document.managedApplications ?? [:]
+            configuredImmediateAdapters = document.immediateAdapters ?? []
+            adapterConfigurationError = nil
+        } catch {
+            isReloadingAdapterConfiguration = false
+            adapterConfigurationError = error.localizedDescription
+        }
+    }
+
+    func validateAdapterConfiguration() {
+        do {
+            let document = try ExternalAdapterConfiguration.load()
+            var findings: [String] = ["配置文件有效"]
+            for adapter in document.adapters where adapter.isEnabled {
+                let url = try adapter.configurationURL()
+                findings.append("\(adapter.name)：\(FileManager.default.fileExists(atPath: url.path) ? "配置文件已找到" : "配置文件尚未创建")")
+            }
+            for adapter in document.immediateAdapters ?? [] where adapter.isEnabled {
+                let running = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == adapter.bundleIdentifier }
+                findings.append("\(adapter.name)：\(running ? "正在运行，可测试" : "未运行（切换时会跳过）")")
+            }
+            adapterValidationResult = findings.joined(separator: "；")
+            adapterConfigurationError = nil
+        } catch {
+            adapterValidationResult = nil
+            adapterConfigurationError = "校验失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func updateAdapterConfiguration(_ mutation: (inout ExternalAdapterDocument) -> Void) {
+        do {
+            var document = try ExternalAdapterConfiguration.load()
+            mutation(&document)
+            try ExternalAdapterConfiguration.save(document)
+            managedApplicationConfig = document.managedApplications ?? [:]
+            configuredImmediateAdapters = document.immediateAdapters ?? []
+            adapterConfigurationError = nil
+        } catch { adapterConfigurationError = error.localizedDescription }
+    }
+
+    func laptopValueSummary(for kind: ConfigurationParameterKind) -> String {
+        switch kind {
+        case .vscode:
+            return "Laptop 参数：编辑器 \(Int(laptopProfile.editorFontSize)) pt · 终端 \(Int(laptopProfile.terminalFontSize)) pt · UI \(laptopProfile.vscodeZoom)"
+        case .browser:
+            return "Laptop 参数：\(laptopProfile.browserZoomPercent)%"
+        case .terminal:
+            return "Laptop 参数：\(Int(laptopProfile.terminalFontSize)) pt"
+        case .dock:
+            return "Laptop 参数：\(laptopProfile.dockSize) px"
+        case .cursor:
+            return "Laptop 参数：\(String(format: "%.2f", laptopProfile.cursorSize))×"
+        case .none:
+            return "Laptop 参数：由应用自身配置决定"
+        }
+    }
+
+    func externalImmediateApps() throws -> [CustomImmediateApp] {
+        try ExternalAdapterConfiguration.load().immediateAdapters?.filter { $0.isEnabled }.map { $0.asImmediateApp() } ?? []
+    }
+
+    var managesTerminal: Bool {
+        (try? ExternalAdapterConfiguration.load().managedApplications?["terminal"]) ?? manageTerminal
+    }
+
+    var managesDock: Bool {
+        (try? ExternalAdapterConfiguration.load().managedApplications?["dock"]) ?? manageDock
     }
 
     var immediateTargets: [ImmediateTarget] {
@@ -99,10 +455,6 @@ final class ManagedPreferences: ObservableObject {
 
     private func saveImmediateZoomSteps() { store.set(immediateZoomSteps, forKey: "immediateZoomSteps") }
 
-    private func saveCustomImmediateApps() {
-        guard let data = try? JSONEncoder().encode(customImmediateApps) else { return }
-        store.set(data, forKey: "customImmediateApps")
-    }
 
     func applyTerminalFont(size: Double) throws {
         let key = "terminalOriginalFontSize"
@@ -116,24 +468,51 @@ final class ManagedPreferences: ObservableObject {
     }
 
     func apply(profile: ScaleProfile, captureBackups: Bool = true) throws {
+        let adapterDocument = try ExternalAdapterConfiguration.load()
+        let externalAdapters = adapterDocument.adapters
+        let managedApplications = adapterDocument.managedApplications
+        let useVSCode = managedApplications?["vscode"] ?? manageVSCode
+        let useChrome = managedApplications?["chrome"] ?? manageChrome
+        let useEdge = managedApplications?["edge"] ?? manageEdge
+        let useDock = managedApplications?["dock"] ?? manageDock
+        let useCursor = managedApplications?["cursor"] ?? manageCursor
+        let useZotero = managedApplications?["zotero"] ?? manageZotero
+        let useNotion = managedApplications?["notion"] ?? manageNotion
+        let useClaude = managedApplications?["claude"] ?? manageClaude
+        let useCodex = managedApplications?["codex"] ?? manageCodex
+        for adapter in externalAdapters where adapter.isEnabled && adapter.mustQuit {
+            if let bundleID = adapter.bundleIdentifier { try ensureNotRunning(bundleIdentifier: bundleID, name: adapter.name) }
+        }
         // Chromium keeps Preferences in memory and rewrites the file on exit.
         // Writing it while the browser is open makes a successful-looking change
         // disappear, so fail before touching any managed configuration.
-        if manageChrome { try ensureNotRunning(bundleIdentifier: "com.google.Chrome", name: "Google Chrome") }
-        if manageEdge { try ensureNotRunning(bundleIdentifier: "com.microsoft.edgemac", name: "Microsoft Edge") }
-        if manageZotero { try ensureNotRunning(bundleIdentifier: "org.zotero.zotero", name: "Zotero") }
-        if manageNotion { try ensureNotRunning(bundleIdentifier: "notion.id", name: "Notion") }
-        if manageClaude { try ensureNotRunning(bundleIdentifier: "com.anthropic.claude", name: "Claude") }
-        if manageCodex { try ensureNotRunning(bundleIdentifier: "com.openai.codex", name: "Codex") }
-        if manageVSCode { try updateVSCode(profile, captureBackups: captureBackups) }
-        if manageChrome { try updateChromium(named: "Google/Chrome", profile: profile, captureBackups: captureBackups) }
-        if manageEdge { try updateChromium(named: "Microsoft Edge", profile: profile, captureBackups: captureBackups) }
-        if manageDock { try setDefault(domain: "com.apple.dock", key: "tilesize", value: profile.dockSize, captureBackups: captureBackups) }
-        if manageCursor { try setDefault(domain: "com.apple.universalaccess", key: "mouseDriverCursorSize", value: profile.cursorSize, captureBackups: captureBackups) }
-        if manageZotero { try updateZotero(profile, captureBackups: captureBackups) }
-        if manageNotion { try updateElectron(profile, preferencesURL: home("Library/Application Support/Notion/Preferences"), captureBackups: captureBackups, updateExistingHosts: true) }
-        if manageClaude { try updateElectron(profile, preferencesURL: home("Library/Application Support/Claude-3p/Preferences"), captureBackups: captureBackups, updateExistingHosts: false) }
-        if manageCodex { try updateElectron(profile, preferencesURL: home("Library/Application Support/Codex/Default/Preferences"), captureBackups: captureBackups, updateExistingHosts: false) }
+        if useChrome { try ensureNotRunning(bundleIdentifier: "com.google.Chrome", name: "Google Chrome") }
+        if useEdge { try ensureNotRunning(bundleIdentifier: "com.microsoft.edgemac", name: "Microsoft Edge") }
+        if useZotero { try ensureNotRunning(bundleIdentifier: "org.zotero.zotero", name: "Zotero") }
+        if useNotion { try ensureNotRunning(bundleIdentifier: "notion.id", name: "Notion") }
+        if useClaude { try ensureNotRunning(bundleIdentifier: "com.anthropic.claude", name: "Claude") }
+        if useCodex { try ensureNotRunning(bundleIdentifier: "com.openai.codex", name: "Codex") }
+        if useVSCode { try updateVSCode(profile, captureBackups: captureBackups) }
+        if useChrome { try updateChromium(named: "Google/Chrome", profile: profile, captureBackups: captureBackups) }
+        if useEdge { try updateChromium(named: "Microsoft Edge", profile: profile, captureBackups: captureBackups) }
+        if useDock { try setDefault(domain: "com.apple.dock", key: "tilesize", value: profile.dockSize, captureBackups: captureBackups) }
+        if useCursor { try setDefault(domain: "com.apple.universalaccess", key: "mouseDriverCursorSize", value: profile.cursorSize, captureBackups: captureBackups) }
+        if useZotero { try updateZotero(profile, captureBackups: captureBackups) }
+        if useNotion { try updateElectron(profile, preferencesURL: home("Library/Application Support/Notion/Preferences"), captureBackups: captureBackups, updateExistingHosts: true) }
+        if useClaude { try updateElectron(profile, preferencesURL: home("Library/Application Support/Claude-3p/Preferences"), captureBackups: captureBackups, updateExistingHosts: false) }
+        if useCodex { try updateElectron(profile, preferencesURL: home("Library/Application Support/Codex/Default/Preferences"), captureBackups: captureBackups, updateExistingHosts: false) }
+        try applyExternalJSONAdapters(externalAdapters, profile: profile, captureBackups: captureBackups)
+    }
+
+    private func applyExternalJSONAdapters(_ adapters: [ExternalJSONAdapter], profile: ScaleProfile, captureBackups: Bool) throws {
+        for adapter in adapters where adapter.isEnabled {
+            let values = try adapter.settings.map { setting -> ([String], Any) in
+                guard !setting.path.isEmpty else { throw PreferenceError.externalAdapterConfig("\(adapter.name) 包含空 JSON 路径") }
+                return (setting.path, setting.profileValue.resolve(profile))
+            }
+            guard !values.isEmpty else { continue }
+            try updateJSON(url: adapter.configurationURL(), paths: values, captureBackups: captureBackups)
+        }
     }
 
     func restore() throws {
@@ -146,18 +525,11 @@ final class ManagedPreferences: ObservableObject {
         saveBackups(backups)
     }
 
-    func restoreOrApplyLaptopDefaults() throws {
-        // Do not capture a possibly half-applied value as the initial backup.
-        if !store.bool(forKey: baselineKey) {
-            saveBackups([:])
-            try apply(profile: .laptop, captureBackups: false)
-            store.set(true, forKey: baselineKey)
-        } else if loadBackups().isEmpty {
-            try apply(profile: .laptop, captureBackups: false)
-        } else {
-            try restore()
-        }
-        if manageDock { try setDefault(domain: "com.apple.dock", key: "tilesize", value: ScaleProfile.laptop.dockSize, captureBackups: false) }
+    func applyLaptopProfile() throws {
+        // Laptop Mode is a defined baseline, not a replay of an old backup. Some
+        // earlier backups captured a Desktop zoom value, which could otherwise
+        // leave Chromium browsers at 125% instead of the Laptop 100% target.
+        try apply(profile: laptopProfile, captureBackups: false)
     }
 
     private func updateVSCode(_ profile: ScaleProfile, captureBackups: Bool) throws {
@@ -342,8 +714,27 @@ final class ManagedPreferences: ObservableObject {
         return result
     }
     private func saveBackups(_ backups: [String: BackupEntry]) { store.set(try? JSONEncoder().encode(backups), forKey: backupKey) }
-    private func saveDesktopProfile() { store.set(try? JSONEncoder().encode(desktopProfile), forKey: "desktopProfile") }
+    private func saveDesktopProfile() {
+        store.set(try? JSONEncoder().encode(desktopProfile), forKey: "desktopProfile") // legacy fallback
+        guard !isReloadingAdapterConfiguration else { return }
+        updateAdapterConfiguration { $0.desktopProfile = desktopProfile }
+    }
+
+    private func saveLaptopProfile() {
+        store.set(try? JSONEncoder().encode(laptopProfile), forKey: "laptopProfile") // legacy fallback
+        guard !isReloadingAdapterConfiguration else { return }
+        updateAdapterConfiguration { $0.laptopProfile = laptopProfile }
+    }
+
+    private func persistProfilesIfNeeded() {
+        guard let document = try? ExternalAdapterConfiguration.load(), document.desktopProfile == nil || document.laptopProfile == nil else { return }
+        updateAdapterConfiguration { document in
+            if document.desktopProfile == nil { document.desktopProfile = desktopProfile }
+            if document.laptopProfile == nil { document.laptopProfile = laptopProfile }
+        }
+    }
     private func saveCustomProfile() { store.set(try? JSONEncoder().encode(customProfile), forKey: "customProfile") }
+    private func saveCustomImmediateApps() { store.set(try? JSONEncoder().encode(customImmediateApps), forKey: "customImmediateApps") }
 }
 
 private enum BackupEntry: Codable {
@@ -363,6 +754,14 @@ private enum JSONValue: Codable {
         case let value as [Any]: self = .array(value.compactMap(JSONValue.init))
         case let value as [String: Any]: self = .object(value.compactMapValues(JSONValue.init))
         default: return nil
+        }
+    }
+    var displayValue: String {
+        switch self {
+        case .string(let value): return value
+        case .number(let value): return String(format: "%.2f", value)
+        case .bool(let value): return value ? "true" : "false"
+        case .array, .object, .null: return "（已保存）"
         }
     }
     var foundationValue: Any {

@@ -30,6 +30,25 @@ struct CustomImmediateApp: Identifiable, Codable, Equatable {
     var bundleIdentifier: String
     var desktopZoomSteps: Int
     var laptopAction: CustomLaptopAction
+    var resetBeforeDesktop: Bool?
+    var launchDelaySeconds: Double?
+    var shortcutIntervalSeconds: Double?
+    var desktopLaunchDelay: TimeInterval { min(max(launchDelaySeconds ?? 2.0, 0.5), 10.0) }
+}
+
+/// Structured output lets the coordinator remember exactly which apps were
+/// successfully synchronized, without inferring success from localized text.
+struct ImmediateZoomResult {
+    var changedNames: [String] = []
+    var changedBundleIdentifiers: [String] = []
+    var unavailableNames: [String] = []
+
+    var summary: String {
+        var parts: [String] = []
+        if !changedNames.isEmpty { parts.append("即时应用：\(changedNames.joined(separator: "、"))") }
+        if !unavailableNames.isEmpty { parts.append("未运行：\(unavailableNames.joined(separator: "、"))") }
+        return parts.isEmpty ? "即时模式：没有选中的目标应用。" : parts.joined(separator: "；")
+    }
 }
 
 struct ImmediateZoomController {
@@ -38,42 +57,44 @@ struct ImmediateZoomController {
     }
 
     static func apply(mode: ScaleMode, targets: [ImmediateTarget], customTargets: [CustomImmediateApp] = [], zoomSteps: [String: Int] = [:], laptopActions: [String: String] = [:]) -> String {
-        guard AXIsProcessTrusted() else { return "即时模式未执行：请在系统设置中授予 MacScaleManager 辅助功能权限。" }
+        applyWithResult(mode: mode, targets: targets, customTargets: customTargets, zoomSteps: zoomSteps, laptopActions: laptopActions).summary
+    }
+
+    static func applyWithResult(mode: ScaleMode, targets: [ImmediateTarget], customTargets: [CustomImmediateApp] = [], zoomSteps: [String: Int] = [:], laptopActions: [String: String] = [:]) -> ImmediateZoomResult {
+        guard AXIsProcessTrusted() else { return ImmediateZoomResult(unavailableNames: ["请在系统设置中授予 MacScaleManager 辅助功能权限"]) }
         let original = NSWorkspace.shared.frontmostApplication
         let applications = NSWorkspace.shared.runningApplications
-        var changed: [String] = []
-        var unavailable: [String] = []
+        var result = ImmediateZoomResult()
         for target in targets {
             guard let application = applications.first(where: { $0.bundleIdentifier == target.bundleIdentifier }) else {
-                unavailable.append(target.title)
+                result.unavailableNames.append(target.title)
                 continue
             }
             application.activate(options: [.activateAllWindows])
             guard waitUntilFrontmost(application) else {
-                unavailable.append("\(target.title)（无法置前）")
+                result.unavailableNames.append("\(target.title)（无法置前）")
                 continue
             }
             applyShortcut(for: target, application: application, mode: mode, desktopZoomSteps: zoomSteps[target.rawValue] ?? (target == .codex ? 3 : 2), laptopAction: CustomLaptopAction(rawValue: laptopActions[target.rawValue] ?? "reset") ?? .reset)
-            changed.append(target.title)
+            result.changedNames.append(target.title)
+            result.changedBundleIdentifiers.append(target.bundleIdentifier)
         }
         for target in customTargets {
             guard let application = applications.first(where: { $0.bundleIdentifier == target.bundleIdentifier }) else {
-                unavailable.append(target.name)
+                result.unavailableNames.append(target.name)
                 continue
             }
             application.activate(options: [.activateAllWindows])
             guard waitUntilFrontmost(application) else {
-                unavailable.append("\(target.name)（无法置前）")
+                result.unavailableNames.append("\(target.name)（无法置前）")
                 continue
             }
             applyShortcut(for: target, mode: mode)
-            changed.append(target.name)
+            result.changedNames.append(target.name)
+            result.changedBundleIdentifiers.append(target.bundleIdentifier)
         }
         if let original { original.activate(options: [.activateAllWindows]) }
-        var parts: [String] = []
-        if !changed.isEmpty { parts.append("即时应用：\(changed.joined(separator: "、"))") }
-        if !unavailable.isEmpty { parts.append("未运行：\(unavailable.joined(separator: "、"))") }
-        return parts.isEmpty ? "即时模式：没有选中的目标应用。" : parts.joined(separator: "；")
+        return result
     }
 
     private static func applyShortcut(for target: ImmediateTarget, application: NSRunningApplication, mode: ScaleMode, desktopZoomSteps: Int, laptopAction: CustomLaptopAction) {
@@ -94,7 +115,9 @@ struct ImmediateZoomController {
             if target.laptopAction == .reset { postShortcut(keyCode: 0x1D) }
             else { postShortcut(keyCode: 0x1B) }
         } else {
-            for _ in 0..<max(1, target.desktopZoomSteps) { postShortcut(keyCode: 0x18) }
+            if target.resetBeforeDesktop ?? false { postShortcut(keyCode: 0x1D) }
+            let interval = min(max(target.shortcutIntervalSeconds ?? 0.25, 0.1), 1.0)
+            for _ in 0..<max(1, target.desktopZoomSteps) { postShortcut(keyCode: 0x18, settleInterval: interval) }
         }
     }
 
