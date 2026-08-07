@@ -37,7 +37,7 @@ struct ImmediateZoomController {
         AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
 
-    static func apply(mode: ScaleMode, targets: [ImmediateTarget], customTargets: [CustomImmediateApp] = [], zoomSteps: [String: Int] = [:]) -> String {
+    static func apply(mode: ScaleMode, targets: [ImmediateTarget], customTargets: [CustomImmediateApp] = [], zoomSteps: [String: Int] = [:], laptopActions: [String: String] = [:]) -> String {
         guard AXIsProcessTrusted() else { return "即时模式未执行：请在系统设置中授予 MacScaleManager 辅助功能权限。" }
         let original = NSWorkspace.shared.frontmostApplication
         let applications = NSWorkspace.shared.runningApplications
@@ -53,7 +53,7 @@ struct ImmediateZoomController {
                 unavailable.append("\(target.title)（无法置前）")
                 continue
             }
-            applyShortcut(for: target, application: application, mode: mode, desktopZoomSteps: zoomSteps[target.rawValue] ?? (target == .codex ? 3 : 2))
+            applyShortcut(for: target, application: application, mode: mode, desktopZoomSteps: zoomSteps[target.rawValue] ?? (target == .codex ? 3 : 2), laptopAction: CustomLaptopAction(rawValue: laptopActions[target.rawValue] ?? "reset") ?? .reset)
             changed.append(target.title)
         }
         for target in customTargets {
@@ -76,10 +76,10 @@ struct ImmediateZoomController {
         return parts.isEmpty ? "即时模式：没有选中的目标应用。" : parts.joined(separator: "；")
     }
 
-    private static func applyShortcut(for target: ImmediateTarget, application: NSRunningApplication, mode: ScaleMode, desktopZoomSteps: Int) {
+    private static func applyShortcut(for target: ImmediateTarget, application: NSRunningApplication, mode: ScaleMode, desktopZoomSteps: Int, laptopAction: CustomLaptopAction) {
         if mode == .laptop {
-            if target == .qq {
-                for _ in 0..<2 { postShortcut(keyCode: 0x1B) }
+            if laptopAction == .zoomOut {
+                for _ in 0..<max(1, desktopZoomSteps) { postShortcut(keyCode: 0x1B) }
             } else {
                 postShortcut(keyCode: 0x1D)
             }

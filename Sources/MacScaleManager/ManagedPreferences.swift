@@ -37,8 +37,9 @@ final class ManagedPreferences: ObservableObject {
     @Published var immediateCodex: Bool { didSet { store.set(immediateCodex, forKey: "immediateCodex") } }
     @Published var immediateClaude: Bool { didSet { store.set(immediateClaude, forKey: "immediateClaude") } }
     @Published var immediateNotion: Bool { didSet { store.set(immediateNotion, forKey: "immediateNotion") } }
-     var immediateTerminal: Bool { didSet { store.set(immediateTerminal, forKey: "immediateTerminal") } }
-     var immediateZoomSteps: [String: Int] { didSet { saveImmediateZoomSteps() } }
+    @Published var immediateTerminal: Bool { didSet { store.set(immediateTerminal, forKey: "immediateTerminal") } }
+    @Published var immediateZoomSteps: [String: Int] { didSet { saveImmediateZoomSteps() } }
+    @Published var immediateLaptopActions: [String: String] { didSet { store.set(immediateLaptopActions, forKey: "immediateLaptopActions") } }
     @Published var customProfile: ScaleProfile { didSet { saveCustomProfile() } }
     @Published var customImmediateApps: [CustomImmediateApp] { didSet { saveCustomImmediateApps() } }
 
@@ -66,6 +67,8 @@ final class ManagedPreferences: ObservableObject {
         immediateTerminal = store.object(forKey: "immediateTerminal") as? Bool ?? true
         let savedZoomSteps = store.dictionary(forKey: "immediateZoomSteps") as? [String: Int] ?? [:]
         immediateZoomSteps = ["qq": 2, "wechat": 2, "codex": 3, "claude": 2, "notion": 2, "terminal": 2].merging(savedZoomSteps) { _, saved in saved }
+        let savedActions = store.dictionary(forKey: "immediateLaptopActions") as? [String: String] ?? [:]
+        immediateLaptopActions = ["qq": "zoomOut", "wechat": "reset", "codex": "reset", "claude": "reset", "notion": "reset", "terminal": "reset"].merging(savedActions) { _, saved in saved }
         if let data = store.data(forKey: "customProfile"), let profile = try? JSONDecoder().decode(ScaleProfile.self, from: data) {
             customProfile = profile
         } else { customProfile = .desktop }
@@ -82,6 +85,11 @@ final class ManagedPreferences: ObservableObject {
     func zoomSteps(for target: ImmediateTarget) -> Int { max(1, immediateZoomSteps[target.rawValue] ?? (target == .codex ? 3 : 2)) }
 
     func setZoomSteps(_ count: Int, for target: ImmediateTarget) { immediateZoomSteps[target.rawValue] = min(max(count, 1), 6) }
+
+    func laptopAction(for target: ImmediateTarget) -> CustomLaptopAction { CustomLaptopAction(rawValue: immediateLaptopActions[target.rawValue] ?? "reset") ?? .reset }
+    func setLaptopAction(_ action: CustomLaptopAction, for target: ImmediateTarget) { immediateLaptopActions[target.rawValue] = action.rawValue }
+    func isImmediateEnabled(_ target: ImmediateTarget) -> Bool { switch target { case .qq: immediateQQ; case .wechat: immediateWeChat; case .codex: immediateCodex; case .claude: immediateClaude; case .notion: immediateNotion; case .terminal: immediateTerminal } }
+    func setImmediateEnabled(_ enabled: Bool, for target: ImmediateTarget) { switch target { case .qq: immediateQQ = enabled; case .wechat: immediateWeChat = enabled; case .codex: immediateCodex = enabled; case .claude: immediateClaude = enabled; case .notion: immediateNotion = enabled; case .terminal: immediateTerminal = enabled } }
 
     private func saveImmediateZoomSteps() { store.set(immediateZoomSteps, forKey: "immediateZoomSteps") }
 

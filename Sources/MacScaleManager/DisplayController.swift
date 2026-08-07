@@ -22,7 +22,7 @@ enum DisplayController {
         let displays = onlineDisplays()
         let builtIn = displays.first(where: { CGDisplayIsBuiltin($0) != 0 })
         let externalIsActive = displays.contains {
-            CGDisplayIsBuiltin($0) == 0 && CGDisplayIsActive($0) != 0
+            CGDisplayIsBuiltin($0) == 0
         }
         return BuiltInDisplayStatus(
             builtInAvailable: builtIn != nil || savedBuiltInDisplayID != nil,

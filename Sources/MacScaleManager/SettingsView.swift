@@ -2,15 +2,20 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var manager: ScaleManager
+    @ObservedObject private var preferences: ManagedPreferences
     @State private var custom: ScaleProfile
     @State private var customAppName = ""
     @State private var customBundleID = ""
     @State private var customZoomSteps = 2
     @State private var customLaptopAction: CustomLaptopAction = .reset
+    @State private var installedApplications: [InstalledApplication]
+    @State private var selectedInstalledBundleID = ""
 
     init(manager: ScaleManager) {
         self.manager = manager
+        _preferences = ObservedObject(wrappedValue: manager.preferences)
         _custom = State(initialValue: manager.preferences.customProfile)
+        _installedApplications = State(initialValue: SettingsView.discoverInstalledApplications())
     }
 
     var body: some View {
@@ -31,47 +36,69 @@ struct SettingsView: View {
             }
             Section("即时模式（会短暂切换前台窗口）") {
                 Toggle("启用即时快捷键缩放", isOn: $manager.preferences.immediateMode)
-                Toggle("QQ", isOn: $manager.preferences.immediateQQ)
-                Toggle("微信", isOn: $manager.preferences.immediateWeChat)
-                Toggle("Codex", isOn: $manager.preferences.immediateCodex)
-                Toggle("Claude", isOn: $manager.preferences.immediateClaude)
-                Toggle("Notion", isOn: $manager.preferences.immediateNotion)
-                Toggle("Terminal", isOn: $manager.preferences.immediateTerminal)
                 ForEach(ImmediateTarget.allCases) { target in
-                    Stepper("\(target.title) Desktop Mode：\(manager.preferences.zoomSteps(for: target)) 次 ⌘+", value: Binding(get: { manager.preferences.zoomSteps(for: target) }, set: { manager.preferences.setZoomSteps($0, for: target) }), in: 1...6)
+                    DisclosureGroup(target.title) {
+                        Toggle("启用即时缩放", isOn: Binding(get: { manager.preferences.isImmediateEnabled(target) }, set: { enabled in manager.preferences.setImmediateEnabled(enabled, for: target) }))
+                        Stepper("Desktop Mode：\(manager.preferences.zoomSteps(for: target)) 次 ⌘+", value: Binding(get: { manager.preferences.zoomSteps(for: target) }, set: { count in manager.preferences.setZoomSteps(count, for: target) }), in: 1...6)
+                        Picker("Laptop Mode", selection: Binding(get: { manager.preferences.laptopAction(for: target) }, set: { action in manager.preferences.setLaptopAction(action, for: target) })) {
+                            ForEach(CustomLaptopAction.allCases) { action in Text(action.title).tag(action) }
+                        }
+                    }
                 }
                 Button("请求辅助功能权限") { _ = ImmediateZoomController.requestAccessibilityPermission() }
                 Text("Desktop Mode 默认连续发送两次 ⌘+（Codex 三次）；QQ 的 Laptop Mode 连续发送两次 ⌘-，微信及其他目标发送 ⌘0。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("自定义即时应用") {
-                TextField("应用名称，例如 Discord", text: $customAppName)
-                TextField("Bundle ID，例如 com.hnc.Discord", text: $customBundleID)
-                Stepper("Desktop Mode 放大：\(customZoomSteps) 次 ⌘+", value: $customZoomSteps, in: 1...6)
-                Picker("Laptop Mode", selection: $customLaptopAction) {
-                    ForEach(CustomLaptopAction.allCases) { action in Text(action.title).tag(action) }
-                }
-                Button("添加自定义应用") {
-                    let name = customAppName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let bundleID = customBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !name.isEmpty, !bundleID.isEmpty else { return }
-                    manager.preferences.customImmediateApps.append(CustomImmediateApp(name: name, bundleIdentifier: bundleID, desktopZoomSteps: customZoomSteps, laptopAction: customLaptopAction))
-                    customAppName = ""
-                    customBundleID = ""
-                }
-                ForEach(manager.preferences.customImmediateApps) { app in
-                    HStack { Text("\(app.name) · \(app.bundleIdentifier)").lineLimit(1)
-                        Spacer()
-                        Button("移除", role: .destructive) { manager.preferences.customImmediateApps.removeAll { $0.id == app.id } }
+                DisclosureGroup("添加自定义应用") {
+                    Picker("已安装应用", selection: $selectedInstalledBundleID) {
+                        Text("选择应用").tag("")
+                        ForEach(installedApplications) { app in
+                            Text("\(app.name) · \(app.bundleIdentifier)").tag(app.bundleIdentifier)
+                        }
                     }
-                    .font(.caption)
+                    .onChange(of: selectedInstalledBundleID) { _, bundleID in
+                        guard let app = installedApplications.first(where: { $0.bundleIdentifier == bundleID }) else { return }
+                        customAppName = app.name
+                        customBundleID = app.bundleIdentifier
+                    }
+                    Button("刷新已安装应用列表") {
+                        installedApplications = SettingsView.discoverInstalledApplications()
+                    }
+                    TextField("应用名称", text: $customAppName)
+                    TextField("Bundle ID", text: $customBundleID)
+                    Stepper("Desktop Mode 放大：\(customZoomSteps) 次 ⌘+", value: $customZoomSteps, in: 1...6)
+                    Picker("Laptop Mode", selection: $customLaptopAction) {
+                        ForEach(CustomLaptopAction.allCases) { action in Text(action.title).tag(action) }
+                    }
+                    Button("添加自定义应用") {
+                        let name = customAppName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let bundleID = customBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !name.isEmpty, !bundleID.isEmpty else { return }
+                        guard !preferences.customImmediateApps.contains(where: { $0.bundleIdentifier == bundleID }) else { return }
+                        preferences.customImmediateApps.append(CustomImmediateApp(name: name, bundleIdentifier: bundleID, desktopZoomSteps: customZoomSteps, laptopAction: customLaptopAction))
+                        customAppName = ""
+                        customBundleID = ""
+                        selectedInstalledBundleID = ""
+                    }
+                }
+                ForEach($preferences.customImmediateApps) { $app in
+                    DisclosureGroup(app.name) {
+                        Text(app.bundleIdentifier).font(.caption).foregroundStyle(.secondary)
+                        Stepper("Desktop Mode：\(app.desktopZoomSteps) 次 ⌘+", value: $app.desktopZoomSteps, in: 1...6)
+                        Picker("Laptop Mode", selection: $app.laptopAction) {
+                            ForEach(CustomLaptopAction.allCases) { action in Text(action.title).tag(action) }
+                        }
+                        Button("移除", role: .destructive) {
+                            preferences.customImmediateApps.removeAll { $0.id == app.id }
+                        }
+                    }
                 }
             }
             Section("内置显示器") {
                 Button(manager.builtInDisplayStatus.isEnabled ? "关闭内置显示器" : "重新启用内置显示器") {
                     manager.toggleBuiltInDisplay()
                 }
-                .disabled(manager.builtInDisplayStatus.isEnabled && !manager.builtInDisplayStatus.hasExternalDisplay)
                 Button("刷新显示器状态") { manager.refreshDisplayStatus() }
                 Text("仅在已连接外接显示器时可关闭内屏。此操作不会更改分辨率、缩放或 HiDPI；重新启用时可在这里或菜单栏完成。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -101,4 +128,26 @@ struct SettingsView: View {
         .padding()
         .frame(width: 530, height: 650)
     }
+
+    private static func discoverInstalledApplications() -> [InstalledApplication] {
+        let locations = FileManager.default.urls(for: .applicationDirectory, in: [.localDomainMask, .userDomainMask])
+        let applications = locations.flatMap { location in
+            (try? FileManager.default.contentsOfDirectory(at: location, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        }
+        var seen = Set<String>()
+        return applications.compactMap { url in
+            guard url.pathExtension == "app", let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier, seen.insert(bundleID).inserted else { return nil }
+            let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                ?? url.deletingPathExtension().lastPathComponent
+            return InstalledApplication(name: name, bundleIdentifier: bundleID)
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
+private struct InstalledApplication: Identifiable {
+    let name: String
+    let bundleIdentifier: String
+    var id: String { bundleIdentifier }
 }

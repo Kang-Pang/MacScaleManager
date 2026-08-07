@@ -23,6 +23,7 @@ private struct MenuContent: View {
     var body: some View {
         Text("MacScaleManager")
             .font(.headline)
+            .onAppear { manager.refreshDisplayStatus() }
         Text("当前模式：\(manager.currentMode.title)")
             .foregroundStyle(.secondary)
         Divider()
@@ -46,7 +47,6 @@ private struct MenuContent: View {
         Button(manager.builtInDisplayStatus.isEnabled ? "关闭内置显示器" : "重新启用内置显示器") {
             manager.toggleBuiltInDisplay()
         }
-        .disabled(manager.builtInDisplayStatus.isEnabled && !manager.builtInDisplayStatus.hasExternalDisplay)
         Divider()
         SettingsLink { Text("Settings…") }
         Button("Restore Default") { manager.restoreDefaults() }

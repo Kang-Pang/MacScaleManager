@@ -61,7 +61,7 @@ final class ScaleManager: ObservableObject {
 
     func apply(_ mode: ScaleMode) {
         if preferences.immediateMode {
-            lastImmediateResult = ImmediateZoomController.apply(mode: mode, targets: preferences.immediateTargets, customTargets: preferences.customImmediateApps, zoomSteps: preferences.immediateZoomSteps)
+            lastImmediateResult = ImmediateZoomController.apply(mode: mode, targets: preferences.immediateTargets, customTargets: preferences.customImmediateApps, zoomSteps: preferences.immediateZoomSteps, laptopActions: preferences.immediateLaptopActions)
         }
         do {
             // Laptop Mode is deliberately a restore operation: users' original values
