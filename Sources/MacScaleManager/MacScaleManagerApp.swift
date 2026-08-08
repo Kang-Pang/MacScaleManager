@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct MacScaleManagerApp: App {
     @StateObject private var manager = ScaleManager()
+    @NSApplicationDelegateAdaptor(MacScaleManagerApplicationDelegate.self) private var appDelegate
 
     var body: some Scene {
         MenuBarExtra {
@@ -14,6 +15,14 @@ struct MacScaleManagerApp: App {
                 .foregroundStyle(manager.accessibilityTrusted ? (manager.currentMode == .desktop ? Color.blue : Color.gray) : Color.orange)
         }
         .menuBarExtraStyle(.menu)
+    }
+}
+
+final class MacScaleManagerApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        // Leaving an internal display disabled is unsafe: an external display
+        // can disconnect while the menu-bar helper is no longer available.
+        _ = DisplayController.setBuiltInDisplay(enabled: true)
     }
 }
 
@@ -83,6 +92,9 @@ private struct MenuContent: View {
         Divider()
         Button("Settings…") { manager.openSettings() }
         Divider()
-        Button("Quit") { NSApplication.shared.terminate(nil) }
+        Button("Quit") {
+            _ = DisplayController.setBuiltInDisplay(enabled: true)
+            NSApplication.shared.terminate(nil)
+        }
     }
 }

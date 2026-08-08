@@ -26,7 +26,7 @@ enum TerminalController {
         preferences["Window Settings"] = profiles
         terminalDefaults.setPersistentDomain(preferences, forName: domain)
         terminalDefaults.synchronize()
-        if isRunning { try? runAppleScript(liveScript) }
+        if isRunning { _ = try? runAppleScript(liveScript) }
     }
 
     private static var isRunning: Bool { NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.apple.Terminal" } }

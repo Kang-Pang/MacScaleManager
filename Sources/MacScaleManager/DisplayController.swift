@@ -10,7 +10,6 @@ struct BuiltInDisplayStatus {
     var canDisable: Bool { builtInAvailable && isEnabled && hasExternalDisplay }
 }
 
-@MainActor
 enum DisplayController {
     /// macOS does not expose an API for enabling or disabling an individual
     /// display. This is the same private CoreGraphics entry point used by

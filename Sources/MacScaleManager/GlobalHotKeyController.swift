@@ -24,7 +24,7 @@ final class GlobalHotKeyController {
             &eventHandlerRef
         )
 
-        var hotKeyID = EventHotKeyID(signature: OSType(0x4D534D47), id: 1) // MSMG
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4D534D47), id: 1) // MSMG
         RegisterEventHotKey(
             UInt32(kVK_ANSI_I),
             UInt32(controlKey | optionKey),

@@ -5,9 +5,22 @@ import Combine
 struct ExternalAdapterDocument: Codable {
     var adapters: [ExternalJSONAdapter]
     var immediateAdapters: [ExternalImmediateAdapter]?
+    var windowLayoutAdapters: [ExternalWindowLayoutAdapter]?
     var managedApplications: [String: Bool]?
     var desktopProfile: ScaleProfile?
     var laptopProfile: ScaleProfile?
+}
+
+/// Independent from immediate shortcut rules: this list only controls window
+/// size and works for apps that do not support ⌘+/⌘0 zooming.
+struct ExternalWindowLayoutAdapter: Codable, Identifiable {
+    var enabled: Bool?
+    var name: String
+    var bundleIdentifier: String
+    var windowSizePercent: Double?
+    var id: String { bundleIdentifier }
+    var isEnabled: Bool { enabled ?? true }
+    var sizeFraction: CGFloat { min(max((windowSizePercent ?? 75) / 100, 0.3), 1.0) }
 }
 
 struct ExternalImmediateAdapter: Codable, Identifiable {
@@ -20,6 +33,13 @@ struct ExternalImmediateAdapter: Codable, Identifiable {
     var resetBeforeDesktop: Bool?
     var launchDelaySeconds: Double?
     var shortcutIntervalSeconds: Double?
+    /// Optional Accessibility window layout. It is deliberately independent
+    /// from shortcut scaling, so a rule may resize a window without posting
+    /// any keyboard shortcuts.
+    var windowLayoutEnabled: Bool?
+    var desktopWindowSizePercent: Double?
+    var laptopWindowSizePercent: Double?
+    var windowLayoutApplyOnLaunch: Bool?
     var id: String { bundleIdentifier }
     var shouldApplyOnLaunch: Bool { applyOnLaunch ?? true }
     var isEnabled: Bool { enabled ?? true }
@@ -27,6 +47,13 @@ struct ExternalImmediateAdapter: Codable, Identifiable {
     var desktopLaunchDelay: Double { min(max(launchDelaySeconds ?? 2.0, 0.5), 10.0) }
     var shortcutInterval: Double { min(max(shortcutIntervalSeconds ?? (bundleIdentifier == "com.openai.codex" ? 0.28 : 0.25), 0.1), 1.0) }
     var summary: String { "\(desktopZoomSteps ?? 2) 次 ⌘+ · 启动后 \(String(format: "%.1f", desktopLaunchDelay)) 秒同步" }
+    var shouldApplyWindowLayout: Bool { windowLayoutEnabled ?? false }
+    var shouldApplyWindowLayoutOnLaunch: Bool { windowLayoutApplyOnLaunch ?? true }
+    var desktopWindowSizeFraction: CGFloat { min(max((desktopWindowSizePercent ?? 75) / 100, 0.3), 1.0) }
+    var laptopWindowSizeFraction: CGFloat { desktopWindowSizeFraction }
+    func windowSizeFraction(for mode: ScaleMode) -> CGFloat {
+        desktopWindowSizeFraction
+    }
     func asImmediateApp() -> CustomImmediateApp {
         CustomImmediateApp(name: name, bundleIdentifier: bundleIdentifier, desktopZoomSteps: min(max(desktopZoomSteps ?? 2, 1), 6), laptopAction: laptopAction ?? .reset, resetBeforeDesktop: shouldResetBeforeDesktop, launchDelaySeconds: desktopLaunchDelay, shortcutIntervalSeconds: shortcutInterval)
     }
@@ -171,6 +198,7 @@ final class ManagedPreferences: ObservableObject {
     @Published var customImmediateApps: [CustomImmediateApp] { didSet { saveCustomImmediateApps() } }
     @Published private(set) var managedApplicationConfig: [String: Bool] = [:]
     @Published private(set) var configuredImmediateAdapters: [ExternalImmediateAdapter] = []
+    @Published private(set) var configuredWindowLayoutAdapters: [ExternalWindowLayoutAdapter] = []
     @Published private(set) var adapterConfigurationError: String?
     @Published private(set) var adapterValidationResult: String?
 
@@ -342,6 +370,42 @@ final class ManagedPreferences: ObservableObject {
         }
     }
 
+    func setConfiguredWindowLayoutEnabled(_ enabled: Bool, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.windowLayoutEnabled = enabled; return updated
+            }
+        }
+    }
+
+    func setConfiguredWindowLayoutSize(_ percent: Double, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.desktopWindowSizePercent = min(max(percent, 30), 100); return updated
+            }
+        }
+    }
+
+    func setConfiguredLaptopWindowLayoutSize(_ percent: Double, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.laptopWindowSizePercent = min(max(percent, 30), 100); return updated
+            }
+        }
+    }
+
+    func setConfiguredWindowLayoutApplyOnLaunch(_ enabled: Bool, bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; updated.windowLayoutApplyOnLaunch = enabled; return updated
+            }
+        }
+    }
+
     func configuredDesktopLaunchApp(bundleIdentifier: String) throws -> CustomImmediateApp? {
         try ExternalAdapterConfiguration.load().immediateAdapters?
             .first { $0.bundleIdentifier == bundleIdentifier && $0.isEnabled && $0.shouldApplyOnLaunch }?
@@ -352,6 +416,46 @@ final class ManagedPreferences: ObservableObject {
         try ExternalAdapterConfiguration.load().immediateAdapters?
             .first { $0.bundleIdentifier == bundleIdentifier && $0.isEnabled }?
             .asImmediateApp()
+    }
+
+    func configuredWindowLayout(bundleIdentifier: String) throws -> ExternalWindowLayoutAdapter? {
+        try ExternalAdapterConfiguration.load().windowLayoutAdapters?
+            .first { $0.bundleIdentifier == bundleIdentifier && $0.isEnabled }
+    }
+
+    func addWindowLayoutAdapter(name: String, bundleIdentifier: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBundleID = bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, !trimmedBundleID.isEmpty else { return }
+        updateAdapterConfiguration { document in
+            var adapters = document.windowLayoutAdapters ?? []
+            guard !adapters.contains(where: { $0.bundleIdentifier == trimmedBundleID }) else { return }
+            adapters.append(ExternalWindowLayoutAdapter(enabled: true, name: trimmedName, bundleIdentifier: trimmedBundleID, windowSizePercent: 75))
+            document.windowLayoutAdapters = adapters
+        }
+    }
+
+    func deleteWindowLayoutAdapter(bundleIdentifier: String) {
+        updateAdapterConfiguration { document in
+            document.windowLayoutAdapters?.removeAll { $0.bundleIdentifier == bundleIdentifier }
+        }
+    }
+
+    func setWindowLayoutEnabled(_ enabled: Bool, bundleIdentifier: String) {
+        updateWindowLayoutAdapter(bundleIdentifier) { $0.enabled = enabled }
+    }
+
+    func setWindowLayoutSize(_ percent: Double, bundleIdentifier: String) {
+        updateWindowLayoutAdapter(bundleIdentifier) { $0.windowSizePercent = min(max(percent, 30), 100) }
+    }
+
+    private func updateWindowLayoutAdapter(_ bundleIdentifier: String, _ mutation: (inout ExternalWindowLayoutAdapter) -> Void) {
+        updateAdapterConfiguration { document in
+            document.windowLayoutAdapters = document.windowLayoutAdapters?.map { adapter in
+                guard adapter.bundleIdentifier == bundleIdentifier else { return adapter }
+                var updated = adapter; mutation(&updated); return updated
+            }
+        }
     }
 
     func setConfiguredImmediateLaptopAction(_ action: CustomLaptopAction, bundleIdentifier: String) {
@@ -365,13 +469,39 @@ final class ManagedPreferences: ObservableObject {
 
     func reloadAdapterConfiguration() {
         do {
-            let document = try ExternalAdapterConfiguration.load()
+            var document = try ExternalAdapterConfiguration.load()
+            // One-time migration from the former immediateAdapters layout fields.
+            let needsMigration = document.windowLayoutAdapters == nil
+            if needsMigration {
+                document.windowLayoutAdapters = document.immediateAdapters?.filter(\.shouldApplyWindowLayout).map {
+                    ExternalWindowLayoutAdapter(enabled: true, name: $0.name, bundleIdentifier: $0.bundleIdentifier, windowSizePercent: $0.desktopWindowSizePercent ?? 75)
+                } ?? []
+            }
+            // Window sizing is now wholly independent from shortcut rules.
+            // Remove the legacy duplicated fields once they have been migrated.
+            let hadLegacyLayoutFields = document.immediateAdapters?.contains {
+                $0.windowLayoutEnabled != nil || $0.desktopWindowSizePercent != nil || $0.laptopWindowSizePercent != nil || $0.windowLayoutApplyOnLaunch != nil
+            } ?? false
+            if hadLegacyLayoutFields {
+                document.immediateAdapters = document.immediateAdapters?.map { adapter in
+                    var updated = adapter
+                    updated.windowLayoutEnabled = nil
+                    updated.desktopWindowSizePercent = nil
+                    updated.laptopWindowSizePercent = nil
+                    updated.windowLayoutApplyOnLaunch = nil
+                    return updated
+                }
+            }
+            if needsMigration || hadLegacyLayoutFields {
+                try ExternalAdapterConfiguration.save(document)
+            }
             isReloadingAdapterConfiguration = true
             if let profile = document.desktopProfile { desktopProfile = profile }
             if let profile = document.laptopProfile { laptopProfile = profile }
             isReloadingAdapterConfiguration = false
             managedApplicationConfig = document.managedApplications ?? [:]
             configuredImmediateAdapters = document.immediateAdapters ?? []
+            configuredWindowLayoutAdapters = document.windowLayoutAdapters ?? []
             adapterConfigurationError = nil
         } catch {
             isReloadingAdapterConfiguration = false
@@ -406,6 +536,7 @@ final class ManagedPreferences: ObservableObject {
             try ExternalAdapterConfiguration.save(document)
             managedApplicationConfig = document.managedApplications ?? [:]
             configuredImmediateAdapters = document.immediateAdapters ?? []
+            configuredWindowLayoutAdapters = document.windowLayoutAdapters ?? []
             adapterConfigurationError = nil
         } catch { adapterConfigurationError = error.localizedDescription }
     }

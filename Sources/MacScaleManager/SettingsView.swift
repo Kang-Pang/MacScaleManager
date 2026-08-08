@@ -10,6 +10,9 @@ struct SettingsView: View {
     @State private var customLaptopAction: CustomLaptopAction = .reset
     @State private var installedApplications: [InstalledApplication]
     @State private var selectedInstalledBundleID = ""
+    @State private var selectedWindowLayoutBundleID = ""
+    @State private var customWindowLayoutName = ""
+    @State private var customWindowLayoutBundleID = ""
 
     init(manager: ScaleManager) {
         self.manager = manager
@@ -165,6 +168,55 @@ struct SettingsView: View {
                 Text("Desktop Mode 默认连续发送两次 ⌘+（Codex 三次）；QQ 的 Laptop Mode 连续发送两次 ⌘-，微信及其他目标发送 ⌘0。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("窗口布局（不发送快捷键）") {
+                Text("列表独立于即时模式。每次切换 Laptop 或 Desktop Mode 后，都会同步所有已运行且启用的条目；之后新启动的应用不会自动改变窗口大小。普通窗口按比例居中，批量同步会跳过原生全屏和填充屏幕窗口。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Picker("添加已安装应用", selection: $selectedWindowLayoutBundleID) {
+                        Text("选择应用").tag("")
+                        ForEach(installedApplications) { app in Text(app.name).tag(app.bundleIdentifier) }
+                    }
+                    Button("添加") {
+                        guard let app = installedApplications.first(where: { $0.bundleIdentifier == selectedWindowLayoutBundleID }) else { return }
+                        preferences.addWindowLayoutAdapter(name: app.name, bundleIdentifier: app.bundleIdentifier)
+                        selectedWindowLayoutBundleID = ""
+                    }
+                    .disabled(selectedWindowLayoutBundleID.isEmpty)
+                }
+                HStack {
+                    TextField("自定义应用名称", text: $customWindowLayoutName)
+                    TextField("Bundle ID", text: $customWindowLayoutBundleID)
+                    Button("自定义添加") {
+                        preferences.addWindowLayoutAdapter(name: customWindowLayoutName, bundleIdentifier: customWindowLayoutBundleID)
+                        customWindowLayoutName = ""; customWindowLayoutBundleID = ""
+                    }
+                    .disabled(customWindowLayoutName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || customWindowLayoutBundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if preferences.configuredWindowLayoutAdapters.isEmpty {
+                    Text("尚未添加窗口布局应用。使用上方选择器或手动填写 Bundle ID 添加。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(preferences.configuredWindowLayoutAdapters) { adapter in
+                    DisclosureGroup {
+                        Text(adapter.bundleIdentifier).font(.caption).foregroundStyle(.secondary)
+                        Stepper("窗口大小：\(Int((adapter.sizeFraction * 100).rounded()))%", value: Binding(
+                            get: { adapter.sizeFraction * 100 },
+                            set: { preferences.setWindowLayoutSize($0, bundleIdentifier: adapter.bundleIdentifier) }
+                        ), in: 30...100, step: 5)
+                        Button("测试窗口布局") { manager.testWindowLayout(adapter) }
+                        Button("删除此应用", role: .destructive) { preferences.deleteWindowLayoutAdapter(bundleIdentifier: adapter.bundleIdentifier) }
+                    } label: {
+                        HStack {
+                            Text(adapter.name)
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { adapter.isEnabled },
+                                set: { preferences.setWindowLayoutEnabled($0, bundleIdentifier: adapter.bundleIdentifier) }
+                            )).labelsHidden()
+                        }
+                    }
+                }
+            }
             Section("内置显示器") {
                 Button(manager.builtInDisplayStatus.isEnabled ? "关闭内置显示器" : "重新启用内置显示器") {
                     manager.toggleBuiltInDisplay()
@@ -203,6 +255,9 @@ struct SettingsView: View {
             if let result = manager.lastImmediateResult {
                 Section("即时模式结果") { Text(result).font(.caption) }
             }
+            if let result = manager.lastWindowLayoutResult {
+                Section("窗口布局结果") { Text(result).font(.caption) }
+            }
             if let result = manager.lastDisplayResult {
                 Section("显示器操作结果") { Text(result).font(.caption) }
             }
@@ -218,6 +273,9 @@ struct SettingsView: View {
         }
         .onDisappear {
             selectedInstalledBundleID = ""
+            selectedWindowLayoutBundleID = ""
+            customWindowLayoutName = ""
+            customWindowLayoutBundleID = ""
             installedApplications.removeAll(keepingCapacity: false)
         }
     }

@@ -113,7 +113,10 @@ struct ImmediateZoomController {
     private static func applyShortcut(for target: CustomImmediateApp, mode: ScaleMode) {
         if mode == .laptop {
             if target.laptopAction == .reset { postShortcut(keyCode: 0x1D) }
-            else { postShortcut(keyCode: 0x1B) }
+            else {
+                let interval = min(max(target.shortcutIntervalSeconds ?? 0.25, 0.1), 1.0)
+                for _ in 0..<max(1, target.desktopZoomSteps) { postShortcut(keyCode: 0x1B, settleInterval: interval) }
+            }
         } else {
             if target.resetBeforeDesktop ?? false { postShortcut(keyCode: 0x1D) }
             let interval = min(max(target.shortcutIntervalSeconds ?? 0.25, 0.1), 1.0)

@@ -26,6 +26,7 @@ final class ScaleManager: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var lastFailureGuidance: String?
     @Published private(set) var lastImmediateResult: String?
+    @Published private(set) var lastWindowLayoutResult: String?
     @Published private(set) var builtInDisplayStatus: BuiltInDisplayStatus
     @Published private(set) var lastDisplayResult: String?
     @Published private(set) var launchSyncStatus: [String: String] = [:]
@@ -44,6 +45,7 @@ final class ScaleManager: ObservableObject {
         lastError = nil
         lastFailureGuidance = nil
         lastImmediateResult = nil
+        lastWindowLayoutResult = nil
         let initialDisplayStatus = DisplayController.currentStatus()
         builtInDisplayStatus = initialDisplayStatus
         lastDisplayResult = nil
@@ -102,7 +104,8 @@ final class ScaleManager: ObservableObject {
     }
 
     private func syncDesktopModeAfterLaunch(_ application: NSRunningApplication) {
-        guard currentMode == .desktop, preferences.immediateMode, let bundleID = application.bundleIdentifier else { return }
+        guard currentMode == .desktop, let bundleID = application.bundleIdentifier else { return }
+        guard preferences.immediateMode else { return }
         guard let target = try? preferences.configuredDesktopLaunchApp(bundleIdentifier: bundleID) else { return }
         guard !desktopSyncedBundleIdentifiers.contains(bundleID) else {
             launchSyncStatus[bundleID] = "本轮 Desktop Mode 已同步"
@@ -229,6 +232,7 @@ final class ScaleManager: ObservableObject {
                 lastImmediateResult = "Desktop Mode 已启用：已跳过即时快捷键，避免重复放大。"
             }
             currentMode = mode
+            scheduleWindowLayoutsForRunningApplications(for: mode)
             if mode == .laptop {
                 desktopSyncedBundleIdentifiers.removeAll()
                 recentDesktopSyncs.removeAll()
@@ -240,13 +244,60 @@ final class ScaleManager: ObservableObject {
         } catch { presentModeFailure(error.localizedDescription, requestedMode: mode) }
     }
 
-    func syncFrontmostImmediateApp() {
-        guard preferences.immediateMode else {
-            lastImmediateResult = "即时模式未启用。"
-            return
+    private func applyWindowLayoutToFrontmost() {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              let bundleID = application.bundleIdentifier,
+              let adapter = try? preferences.configuredWindowLayout(bundleIdentifier: bundleID) else { return }
+        recordWindowLayout(WindowLayoutController.apply(to: application, sizeFraction: adapter.sizeFraction), name: adapter.name, fraction: adapter.sizeFraction)
+    }
+
+    /// Apply layout to every running application that has opted in, just like
+    /// immediate zoom rules. No activation is required, so focus stays put.
+    private func scheduleWindowLayoutsForRunningApplications(for mode: ScaleMode) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, self.currentMode == mode else { return }
+            let running = NSWorkspace.shared.runningApplications
+            var changed: [String] = []
+            var skipped: [String] = []
+            for adapter in self.preferences.configuredWindowLayoutAdapters where adapter.isEnabled {
+                guard let application = running.first(where: { $0.bundleIdentifier == adapter.bundleIdentifier }) else { continue }
+                switch WindowLayoutController.apply(to: application, sizeFraction: adapter.sizeFraction) {
+                case .changed: changed.append(adapter.name)
+                case .skipped(let reason): skipped.append("\(adapter.name)（\(reason)）")
+                case .failed(let reason): skipped.append("\(adapter.name)（\(reason)）")
+                }
+            }
+            if !changed.isEmpty || !skipped.isEmpty {
+                var parts: [String] = []
+                if !changed.isEmpty { parts.append("已调整：\(changed.joined(separator: "、"))") }
+                if !skipped.isEmpty { parts.append("跳过：\(skipped.joined(separator: "、"))") }
+                self.lastWindowLayoutResult = "窗口布局同步：" + parts.joined(separator: "；")
+            }
         }
+    }
+
+    private func recordWindowLayout(_ result: WindowLayoutResult, name: String, fraction: CGFloat) {
+        switch result {
+        case .changed: lastWindowLayoutResult = "窗口布局：已将 \(name) 调整为屏幕的 \(Int((fraction * 100).rounded()))%。"
+        case .skipped(let reason): lastWindowLayoutResult = "窗口布局：跳过 \(name)（\(reason)）。"
+        case .failed(let reason): lastWindowLayoutResult = "窗口布局失败：\(name)（\(reason)）。"
+        }
+    }
+
+    func syncFrontmostImmediateApp() {
         guard let app = NSWorkspace.shared.frontmostApplication, let bundleID = app.bundleIdentifier else {
             lastImmediateResult = "无法识别当前前台应用。"
+            return
+        }
+        // The menu command is intentionally universal: it is also useful for
+        // one-off apps that have no persistent scaling rule yet. Configured
+        // apps keep their own percentage; every other normal window uses 75%.
+        let layout = try? preferences.configuredWindowLayout(bundleIdentifier: bundleID)
+        let fraction = layout?.sizeFraction ?? 0.75
+        let name = layout?.name ?? app.localizedName ?? bundleID
+        scheduleForcedWindowLayout(application: app, name: name, fraction: fraction)
+        guard preferences.immediateMode else {
+            lastImmediateResult = "已同步当前前台窗口布局；即时快捷键缩放未启用。"
             return
         }
         if currentMode == .desktop && desktopSyncedBundleIdentifiers.contains(bundleID) {
@@ -273,6 +324,20 @@ final class ScaleManager: ObservableObject {
         } catch { lastImmediateResult = "前台同步失败：\(error.localizedDescription)" }
     }
 
+    /// The explicit menu command is allowed to leave full-screen/zoomed state.
+    /// A second pass handles the brief native full-screen exit animation.
+    private func scheduleForcedWindowLayout(application: NSRunningApplication, name: String, fraction: CGFloat) {
+        lastWindowLayoutResult = "窗口布局：正在调整 \(name)…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            self.recordWindowLayout(WindowLayoutController.apply(to: application, sizeFraction: fraction, force: true), name: name, fraction: fraction)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+                guard let self else { return }
+                self.recordWindowLayout(WindowLayoutController.apply(to: application, sizeFraction: fraction, force: true), name: name, fraction: fraction)
+            }
+        }
+    }
+
     func immediateStatus(for adapter: ExternalImmediateAdapter) -> String {
         guard currentMode == .desktop else { return "等待 Desktop Mode" }
         guard adapter.isEnabled && adapter.shouldApplyOnLaunch else { return "未启用启动同步" }
@@ -291,6 +356,18 @@ final class ScaleManager: ObservableObject {
             return
         }
         lastImmediateResult = "测试 Desktop 放大：" + ImmediateZoomController.apply(mode: .desktop, targets: [], customTargets: [adapter.asImmediateApp()])
+    }
+
+    func testWindowLayout(_ adapter: ExternalWindowLayoutAdapter) {
+        guard adapter.isEnabled else {
+            lastWindowLayoutResult = "测试未执行：请先为 \(adapter.name) 启用“调整窗口布局”。"
+            return
+        }
+        guard let application = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == adapter.bundleIdentifier }) else {
+            lastWindowLayoutResult = "测试未执行：\(adapter.name) 尚未运行。"
+            return
+        }
+        recordWindowLayout(WindowLayoutController.apply(to: application, sizeFraction: adapter.sizeFraction), name: adapter.name, fraction: adapter.sizeFraction)
     }
 
     func restoreDefaults() {
