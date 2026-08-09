@@ -52,6 +52,12 @@ struct ImmediateZoomResult {
 }
 
 struct ImmediateZoomController {
+    private struct ShortcutRequest {
+        let name: String
+        let bundleIdentifier: String
+        let perform: () -> Void
+    }
+
     static func requestAccessibilityPermission() -> Bool {
         AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
@@ -65,39 +71,38 @@ struct ImmediateZoomController {
         let original = NSWorkspace.shared.frontmostApplication
         let applications = NSWorkspace.shared.runningApplications
         var result = ImmediateZoomResult()
-        for target in targets {
-            guard let application = applications.first(where: { $0.bundleIdentifier == target.bundleIdentifier }) else {
-                result.unavailableNames.append(target.title)
-                continue
+        let requests = targets.map { target in
+            ShortcutRequest(name: target.title, bundleIdentifier: target.bundleIdentifier) {
+                applyShortcut(
+                    for: target,
+                    mode: mode,
+                    desktopZoomSteps: zoomSteps[target.rawValue] ?? (target == .codex ? 3 : 2),
+                    laptopAction: CustomLaptopAction(rawValue: laptopActions[target.rawValue] ?? "reset") ?? .reset
+                )
             }
-            application.activate(options: [.activateAllWindows])
-            guard waitUntilFrontmost(application) else {
-                result.unavailableNames.append("\(target.title)（无法置前）")
-                continue
+        } + customTargets.map { target in
+            ShortcutRequest(name: target.name, bundleIdentifier: target.bundleIdentifier) {
+                applyShortcut(for: target, mode: mode)
             }
-            applyShortcut(for: target, application: application, mode: mode, desktopZoomSteps: zoomSteps[target.rawValue] ?? (target == .codex ? 3 : 2), laptopAction: CustomLaptopAction(rawValue: laptopActions[target.rawValue] ?? "reset") ?? .reset)
-            result.changedNames.append(target.title)
-            result.changedBundleIdentifiers.append(target.bundleIdentifier)
         }
-        for target in customTargets {
-            guard let application = applications.first(where: { $0.bundleIdentifier == target.bundleIdentifier }) else {
-                result.unavailableNames.append(target.name)
+        for request in requests {
+            guard let application = applications.first(where: { $0.bundleIdentifier == request.bundleIdentifier }) else {
+                result.unavailableNames.append(request.name)
                 continue
             }
-            application.activate(options: [.activateAllWindows])
-            guard waitUntilFrontmost(application) else {
-                result.unavailableNames.append("\(target.name)（无法置前）")
+            guard focusForKeyboardInput(application) else {
+                result.unavailableNames.append("\(request.name)（无法置前）")
                 continue
             }
-            applyShortcut(for: target, mode: mode)
-            result.changedNames.append(target.name)
-            result.changedBundleIdentifiers.append(target.bundleIdentifier)
+            request.perform()
+            result.changedNames.append(request.name)
+            result.changedBundleIdentifiers.append(request.bundleIdentifier)
         }
         if let original { original.activate(options: [.activateAllWindows]) }
         return result
     }
 
-    private static func applyShortcut(for target: ImmediateTarget, application: NSRunningApplication, mode: ScaleMode, desktopZoomSteps: Int, laptopAction: CustomLaptopAction) {
+    private static func applyShortcut(for target: ImmediateTarget, mode: ScaleMode, desktopZoomSteps: Int, laptopAction: CustomLaptopAction) {
         if mode == .laptop {
             if laptopAction == .zoomOut {
                 for _ in 0..<max(1, desktopZoomSteps) { postShortcut(keyCode: 0x1B) }
@@ -125,7 +130,7 @@ struct ImmediateZoomController {
     }
 
     private static func waitUntilFrontmost(_ application: NSRunningApplication) -> Bool {
-        let deadline = Date().addingTimeInterval(1.5)
+        let deadline = Date().addingTimeInterval(2.5)
         while Date() < deadline {
             if NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier {
                 return true
@@ -133,6 +138,27 @@ struct ImmediateZoomController {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
         return false
+    }
+
+    private static func focusForKeyboardInput(_ application: NSRunningApplication) -> Bool {
+        // A menu-bar app is normally frontmost at this point. Merely raising a
+        // window is not enough: the app must own the keyboard focus before CG
+        // keyboard events are posted (Terminal is particularly strict about it).
+        application.activate(options: [.activateAllWindows])
+        let element = AXUIElementCreateApplication(application.processIdentifier)
+        _ = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        var focusedWindow: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
+           let window = focusedWindow as! AXUIElement? {
+            _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
+        guard waitUntilFrontmost(application) else { return false }
+        // Let the target's event loop install the focused responder before the
+        // first shortcut. This is intentionally longer than the inter-key delay.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.45))
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier
     }
 
     private static func postShortcut(keyCode: CGKeyCode, flags: CGEventFlags = .maskCommand, settleInterval: TimeInterval = 0.25) {

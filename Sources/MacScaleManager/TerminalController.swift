@@ -12,7 +12,21 @@ enum TerminalController {
     }
 
     static func setDefaultFontSize(_ size: Double) throws {
-        let liveScript = "tell application \"Terminal\" to set font size of default settings to \(Int(size.rounded()))"
+        let liveScript = """
+        tell application "Terminal"
+            set activeDefaultSettings to default settings
+            set font size of activeDefaultSettings to \(Int(size.rounded()))
+            repeat with terminalWindow in windows
+                repeat with terminalTab in tabs of terminalWindow
+                    try
+                        if name of current settings of terminalTab is name of activeDefaultSettings then
+                            set current settings of terminalTab to activeDefaultSettings
+                        end if
+                    end try
+                end repeat
+            end repeat
+        end tell
+        """
         guard var preferences = terminalDefaults.persistentDomain(forName: domain),
               let profileName = preferences["Default Window Settings"] as? String,
               var profiles = preferences["Window Settings"] as? [String: Any],

@@ -84,10 +84,11 @@ enum WindowLayoutController {
            subrole == "AXFullScreenWindow" { return true }
         guard let screen = targetScreen(for: window), let size = size(of: window) else { return false }
         // Dragging a macOS window to the top uses the "zoom/fill" state rather
-        // than AXFullScreen. It fills visibleFrame (excluding menu bar/Dock),
-        // so compare with that area instead of the physical screen frame.
+        // than AXFullScreen. Chromium-style title bars and multi-display
+        // coordinate rounding can leave a few pixels of variance, so treat a
+        // window that is effectively filling visibleFrame as protected too.
         let visible = screen.visibleFrame
-        return size.width >= visible.width - 8 && size.height >= visible.height - 8
+        return size.width >= visible.width * 0.96 && size.height >= visible.height * 0.90
     }
 
     private static func size(of window: AXUIElement) -> CGSize? {

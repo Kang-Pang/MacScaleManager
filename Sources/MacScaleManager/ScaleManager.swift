@@ -35,6 +35,8 @@ final class ScaleManager: ObservableObject {
     private var hotKeyController: GlobalHotKeyController?
     private var applicationLaunchObserver: NSObjectProtocol?
     private var applicationTerminationObserver: NSObjectProtocol?
+    private var applicationActivationObserver: NSObjectProtocol?
+    private var lastUserApplication: NSRunningApplication?
     private var recentDesktopSyncs: [String: Date] = [:]
     private var desktopSyncedBundleIdentifiers: Set<String> = []
     private var settingsWindowController: SettingsWindowController?
@@ -55,6 +57,8 @@ final class ScaleManager: ObservableObject {
         hotKeyController = nil
         applicationLaunchObserver = nil
         applicationTerminationObserver = nil
+        applicationActivationObserver = nil
+        lastUserApplication = nil
         // Persisting the selected mode also makes a launch after an app update or
         // restart restore the intended workspace configuration.
         do {
@@ -74,6 +78,10 @@ final class ScaleManager: ObservableObject {
         hotKeyController = GlobalHotKeyController { [weak self] in
             self?.enableBuiltInDisplay()
         }
+        if let application = NSWorkspace.shared.frontmostApplication,
+           application.bundleIdentifier != Bundle.main.bundleIdentifier {
+            lastUserApplication = application
+        }
         applicationLaunchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main
         ) { [weak self] notification in
@@ -86,6 +94,13 @@ final class ScaleManager: ObservableObject {
             guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let bundleID = application.bundleIdentifier else { return }
             Task { @MainActor in self?.clearDesktopSyncState(bundleIdentifier: bundleID) }
+        }
+        applicationActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  application.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+            Task { @MainActor in self?.lastUserApplication = application }
         }
     }
 
@@ -213,23 +228,37 @@ final class ScaleManager: ObservableObject {
                 try preferences.apply(profile: profile(for: mode))
                 if preferences.managesTerminal { try? preferences.applyTerminalFont(size: profile(for: mode).terminalFontSize) }
             }
-            if preferences.immediateMode && !(mode == .desktop && currentMode == .desktop) {
+            if preferences.immediateMode {
                 let configuredImmediateApps = try preferences.externalImmediateApps()
                 let usesManifest = !configuredImmediateApps.isEmpty
-                let result = ImmediateZoomController.applyWithResult(
-                    mode: mode,
-                    targets: usesManifest ? [] : preferences.immediateTargets,
-                    customTargets: configuredImmediateApps,
-                    zoomSteps: preferences.immediateZoomSteps,
-                    laptopActions: preferences.immediateLaptopActions
-                )
-                lastImmediateResult = result.summary
-                if mode == .desktop {
-                    desktopSyncedBundleIdentifiers.formUnion(result.changedBundleIdentifiers)
+                let isRepeatedDesktop = mode == .desktop && currentMode == .desktop
+                if isRepeatedDesktop && usesManifest {
+                    // A repeated Desktop selection is safe only for rules that
+                    // reset with ⌘0 before zooming again. QQ-style rules that
+                    // cannot reset remain untouched to prevent compounding.
+                    let resettableTargets = configuredImmediateApps.filter { $0.resetBeforeDesktop ?? false }
+                    if resettableTargets.isEmpty {
+                        lastImmediateResult = "Desktop Mode 已启用：没有可安全复位的即时应用，已跳过避免重复放大。"
+                    } else {
+                        let result = ImmediateZoomController.applyWithResult(mode: .desktop, targets: [], customTargets: resettableTargets)
+                        lastImmediateResult = "重新同步（先 ⌘0 复位）：" + result.summary
+                        desktopSyncedBundleIdentifiers.formUnion(result.changedBundleIdentifiers)
+                    }
+                } else if !isRepeatedDesktop {
+                    let result = ImmediateZoomController.applyWithResult(
+                        mode: mode,
+                        targets: usesManifest ? [] : preferences.immediateTargets,
+                        customTargets: configuredImmediateApps,
+                        zoomSteps: preferences.immediateZoomSteps,
+                        laptopActions: preferences.immediateLaptopActions
+                    )
+                    lastImmediateResult = result.summary
+                    if mode == .desktop {
+                        desktopSyncedBundleIdentifiers.formUnion(result.changedBundleIdentifiers)
+                    }
+                } else {
+                    lastImmediateResult = "Desktop Mode 已启用：旧版即时规则无法安全复位，已跳过避免重复放大。"
                 }
-            }
-            if preferences.immediateMode && mode == .desktop && currentMode == .desktop {
-                lastImmediateResult = "Desktop Mode 已启用：已跳过即时快捷键，避免重复放大。"
             }
             currentMode = mode
             scheduleWindowLayoutsForRunningApplications(for: mode)
@@ -285,7 +314,7 @@ final class ScaleManager: ObservableObject {
     }
 
     func syncFrontmostImmediateApp() {
-        guard let app = NSWorkspace.shared.frontmostApplication, let bundleID = app.bundleIdentifier else {
+        guard let app = effectiveFrontmostApplication(), let bundleID = app.bundleIdentifier else {
             lastImmediateResult = "无法识别当前前台应用。"
             return
         }
@@ -300,13 +329,13 @@ final class ScaleManager: ObservableObject {
             lastImmediateResult = "已同步当前前台窗口布局；即时快捷键缩放未启用。"
             return
         }
-        if currentMode == .desktop && desktopSyncedBundleIdentifiers.contains(bundleID) {
-            lastImmediateResult = "\(app.localizedName ?? bundleID) 本轮 Desktop Mode 已同步；已跳过，避免重复放大。"
-            return
-        }
         do {
             guard let target = try preferences.configuredImmediateApp(bundleIdentifier: bundleID) else {
                 lastImmediateResult = "当前前台应用未配置即时缩放。"
+                return
+            }
+            if currentMode == .desktop && desktopSyncedBundleIdentifiers.contains(bundleID), !(target.resetBeforeDesktop ?? false) {
+                lastImmediateResult = "\(app.localizedName ?? bundleID) 本轮 Desktop Mode 已同步；此应用无法安全 ⌘0 复位，已跳过以避免重复放大。"
                 return
             }
             let result = ImmediateZoomController.applyWithResult(mode: currentMode, targets: [], customTargets: [target])
@@ -322,6 +351,14 @@ final class ScaleManager: ObservableObject {
                 launchSyncStatus[bundleID] = "同步失败"
             }
         } catch { lastImmediateResult = "前台同步失败：\(error.localizedDescription)" }
+    }
+
+    private func effectiveFrontmostApplication() -> NSRunningApplication? {
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if frontmost?.bundleIdentifier != Bundle.main.bundleIdentifier { return frontmost }
+        guard let last = lastUserApplication,
+              NSWorkspace.shared.runningApplications.contains(where: { $0.processIdentifier == last.processIdentifier }) else { return frontmost }
+        return last
     }
 
     /// The explicit menu command is allowed to leave full-screen/zoomed state.

@@ -36,7 +36,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.title = "MacScaleManager Settings"
         window.setContentSize(NSSize(width: 580, height: 720))
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.isReleasedWhenClosed = false
+        // Settings is recreated on demand. Releasing the AppKit window as well
+        // as its hosted SwiftUI tree keeps repeated Settings visits from
+        // retaining backing-store and view-cache memory in the menu-bar app.
+        window.isReleasedWhenClosed = true
         super.init(window: window)
         window.delegate = self
     }
