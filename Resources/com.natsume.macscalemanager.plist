@@ -8,7 +8,7 @@
 	<string>Interactive</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/natsume/Applications/MacScaleManager.app/Contents/MacOS/MacScaleManager</string>
+		<string>/Users/natsume/Applications/MacScaleManager/release/MacScaleManager.app/Contents/MacOS/MacScaleManager</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

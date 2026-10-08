@@ -24,7 +24,28 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("配置文件模式（需退出目标应用）") {
+            Section("按屏幕自动缩放") {
+                Toggle("应用随所在屏幕自动缩放", isOn: Binding(
+                    get: { preferences.automaticScreenScaling.applications },
+                    set: { preferences.setAutomaticScreenScaling(applications: $0) }
+                ))
+                Toggle("Dock 随所在屏幕自动调整大小", isOn: Binding(
+                    get: { preferences.automaticScreenScaling.dock },
+                    set: { preferences.setAutomaticScreenScaling(dock: $0) }
+                ))
+                Toggle("换屏时允许配置文件应用正常重启", isOn: Binding(
+                    get: { preferences.automaticScreenScaling.allowsConfigurationRestart },
+                    set: { preferences.setAutomaticScreenScaling(restartConfigurationApplications: $0) }
+                ))
+                Text("内置屏使用 Laptop 参数，外接屏使用 Desktop 参数。拖动松开并停稳至少 0.5 秒后同步；不改变窗口布局。其他系统设置仍按菜单中的手动模式。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("即时规则只操作前台应用，后台应用激活后同步。Edge 等配置文件规则不使用页面快捷键：换屏后先在目标屏幕弹窗，确认重启后才正常退出、写入配置并重开；取消后不重复弹窗。退出被取消或超时则不修改、不强制关闭。关闭此选项后只显示等待。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Dock 使用配置文件模式中的开关和 Laptop/Desktop 大小（当前 \(preferences.laptopProfile.dockSize)/\(preferences.desktopProfile.dockSize)）。实时调节使用系统私有接口；无法确认 Dock 位置或接口失效时保持原大小，不反复重启 Dock。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(manager.automaticScalingStatus).font(.caption)
+            }
+            Section("配置文件模式") {
                 VStack(alignment: .leading, spacing: 5) {
                     Label("配置档案", systemImage: "slider.horizontal.3")
                         .font(.headline)
@@ -60,9 +81,21 @@ struct SettingsView: View {
                 ForEach(preferences.configurationItems) { item in
                     DisclosureGroup {
                         configurationProfileControls(for: item.kind)
-                        if item.id == "edge" {
-                            Text("Edge 运行时会覆盖配置文件；已打开时请在 immediateAdapters 中启用 Edge。")
-                                .font(.caption).foregroundStyle(.secondary)
+                        if ["vscode", "chrome", "edge", "zotero", "notion", "claude", "codex"].contains(item.id) {
+                            Toggle("切换时自动退出应用", isOn: Binding(
+                                get: { preferences.managedApplicationRequiresQuit(item.id) },
+                                set: { preferences.setManagedApplicationRequiresQuit($0, key: item.id) }
+                            ))
+                            if preferences.managedApplicationRequiresQuit(item.id) {
+                                Text("运行中会进入切换预检；选择“关闭并切换”后请求正常退出，再写入配置。未运行的应用直接跳过退出步骤。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else if item.id == "vscode" {
+                                Text("直接更新 settings.json，VS Code 会自动读取字体与缩放设置，无需退出。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text("直接写入配置。此应用可能需要重启才生效，或在退出时覆盖更改。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     } label: {
                         HStack {
@@ -73,6 +106,29 @@ struct SettingsView: View {
                                 set: { preferences.setManagedApplicationEnabled($0, key: item.id) }
                             ))
                             .labelsHidden()
+                        }
+                    }
+                }
+                ForEach(Array(preferences.configuredJSONAdapters.enumerated()), id: \.offset) { index, adapter in
+                    DisclosureGroup {
+                        Text(adapter.relativePath).font(.caption).foregroundStyle(.secondary)
+                        Toggle("切换时自动退出应用", isOn: Binding(
+                            get: { adapter.mustQuit },
+                            set: { preferences.setJSONAdapterRequiresQuit($0, index: index) }
+                        ))
+                        .disabled(adapter.bundleIdentifier == nil)
+                        Text(adapter.bundleIdentifier == nil
+                             ? "需填写 bundleIdentifier 才能识别并退出应用。"
+                             : "开启后进入切换预检，选择“关闭并切换”再写入；关闭后直接写入配置。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } label: {
+                        HStack {
+                            Text(adapter.name)
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { adapter.isEnabled },
+                                set: { preferences.setJSONAdapterEnabled($0, index: index) }
+                            )).labelsHidden()
                         }
                     }
                 }
@@ -169,7 +225,7 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("窗口布局（不发送快捷键）") {
-                Text("列表独立于即时模式。每次切换 Laptop 或 Desktop Mode 后，都会同步所有已运行且启用的条目；之后新启动的应用不会自动改变窗口大小。普通窗口按比例居中，批量同步会跳过原生全屏和填充屏幕窗口。")
+                Text("切换 Laptop 或 Desktop Mode 后同步已运行的应用，新启动的应用不会自动调整。可选择按比例居中，或填满屏幕并在左侧留出台前调度空间。批量同步跳过原生全屏；居中布局也跳过填充屏幕窗口。测试或“只调整当前应用窗口”可退出全屏并应用布局；“只调整当前应用字体/缩放”不改变窗口布局。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Picker("添加已安装应用", selection: $selectedWindowLayoutBundleID) {
@@ -199,16 +255,34 @@ struct SettingsView: View {
                 ForEach(preferences.configuredWindowLayoutAdapters) { adapter in
                     DisclosureGroup {
                         Text(adapter.bundleIdentifier).font(.caption).foregroundStyle(.secondary)
-                        Stepper("窗口大小：\(Int((adapter.sizeFraction * 100).rounded()))%", value: Binding(
-                            get: { adapter.sizeFraction * 100 },
-                            set: { preferences.setWindowLayoutSize($0, bundleIdentifier: adapter.bundleIdentifier) }
-                        ), in: 30...100, step: 5)
+                        Picker("布局方式", selection: Binding(
+                            get: { adapter.style },
+                            set: { preferences.setWindowLayoutStyle($0, bundleIdentifier: adapter.bundleIdentifier) }
+                        )) {
+                            ForEach(WindowLayoutStyle.allCases) { style in
+                                Text(style.title).tag(style)
+                            }
+                        }
+                        if adapter.style == .fillWithLeftGap {
+                            Stepper("左侧留空：\(Int((adapter.leftGapFraction * 100).rounded()))%", value: Binding(
+                                get: { adapter.leftGapFraction * 100 },
+                                set: { preferences.setWindowLayoutLeftGap($0, bundleIdentifier: adapter.bundleIdentifier) }
+                            ), in: 0...40, step: 1)
+                            Text("默认 10%，按此窗口所在屏幕的宽度计算，剩余区域填满；保留菜单栏和 Dock。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Stepper("窗口大小：\(Int((adapter.sizeFraction * 100).rounded()))%", value: Binding(
+                                get: { adapter.sizeFraction * 100 },
+                                set: { preferences.setWindowLayoutSize($0, bundleIdentifier: adapter.bundleIdentifier) }
+                            ), in: 30...100, step: 5)
+                        }
                         Button("测试窗口布局") { manager.testWindowLayout(adapter) }
                         Button("删除此应用", role: .destructive) { preferences.deleteWindowLayoutAdapter(bundleIdentifier: adapter.bundleIdentifier) }
                     } label: {
                         HStack {
                             Text(adapter.name)
                             Spacer()
+                            Text(adapter.layoutSummary).font(.caption).foregroundStyle(.secondary)
                             Toggle("", isOn: Binding(
                                 get: { adapter.isEnabled },
                                 set: { preferences.setWindowLayoutEnabled($0, bundleIdentifier: adapter.bundleIdentifier) }
@@ -253,7 +327,7 @@ struct SettingsView: View {
                 }
             }
             if let result = manager.lastImmediateResult {
-                Section("即时模式结果") { Text(result).font(.caption) }
+                Section("字体/缩放结果") { Text(result).font(.caption) }
             }
             if let result = manager.lastWindowLayoutResult {
                 Section("窗口布局结果") { Text(result).font(.caption) }

@@ -7,8 +7,10 @@ struct ExternalAdapterDocument: Codable {
     var immediateAdapters: [ExternalImmediateAdapter]?
     var windowLayoutAdapters: [ExternalWindowLayoutAdapter]?
     var managedApplications: [String: Bool]?
+    var managedApplicationRequiresQuit: [String: Bool]?
     var desktopProfile: ScaleProfile?
     var laptopProfile: ScaleProfile?
+    var automaticScreenScaling: AutomaticScreenScaling?
 }
 
 /// Independent from immediate shortcut rules: this list only controls window
@@ -18,9 +20,18 @@ struct ExternalWindowLayoutAdapter: Codable, Identifiable {
     var name: String
     var bundleIdentifier: String
     var windowSizePercent: Double?
+    var layoutStyle: WindowLayoutStyle?
+    var leftGapPercent: Double?
     var id: String { bundleIdentifier }
     var isEnabled: Bool { enabled ?? true }
     var sizeFraction: CGFloat { min(max((windowSizePercent ?? 75) / 100, 0.3), 1.0) }
+    var style: WindowLayoutStyle { layoutStyle ?? .centered }
+    var leftGapFraction: CGFloat { min(max((leftGapPercent ?? 10) / 100, 0), 0.4) }
+    var layoutSummary: String {
+        style == .fillWithLeftGap
+            ? "填满屏幕，左侧留空 \(Int((leftGapFraction * 100).rounded()))%"
+            : "按比例居中 \(Int((sizeFraction * 100).rounded()))%"
+    }
 }
 
 struct ExternalImmediateAdapter: Codable, Identifiable {
@@ -60,11 +71,11 @@ struct ExternalImmediateAdapter: Codable, Identifiable {
 }
 
 struct ExternalJSONAdapter: Codable {
-    let enabled: Bool?
+    var enabled: Bool?
     let name: String
     let bundleIdentifier: String?
     let relativePath: String
-    let requiresQuit: Bool?
+    var requiresQuit: Bool?
     let settings: [ExternalJSONSetting]
     var isEnabled: Bool { enabled ?? true }
     var mustQuit: Bool { requiresQuit ?? true }
@@ -137,6 +148,13 @@ struct BlockingApplication: Identifiable {
     var id: String { "\(application.processIdentifier)-\(application.bundleIdentifier ?? name)" }
 }
 
+struct ScreenConfigurationTarget {
+    let key: String?
+    let bundleIdentifier: String
+    let name: String
+    let requiresQuit: Bool
+}
+
 private let configurationItemDefinitions: [String: ConfigurationItem] = [
     "vscode": ConfigurationItem(id: "vscode", title: "VS Code", kind: .vscode),
     "terminal": ConfigurationItem(id: "terminal", title: "Terminal.app", kind: .terminal),
@@ -197,10 +215,13 @@ final class ManagedPreferences: ObservableObject {
     @Published var customProfile: ScaleProfile { didSet { saveCustomProfile() } }
     @Published var customImmediateApps: [CustomImmediateApp] { didSet { saveCustomImmediateApps() } }
     @Published private(set) var managedApplicationConfig: [String: Bool] = [:]
+    @Published private(set) var managedApplicationQuitConfig: [String: Bool] = [:]
+    @Published private(set) var configuredJSONAdapters: [ExternalJSONAdapter] = []
     @Published private(set) var configuredImmediateAdapters: [ExternalImmediateAdapter] = []
     @Published private(set) var configuredWindowLayoutAdapters: [ExternalWindowLayoutAdapter] = []
     @Published private(set) var adapterConfigurationError: String?
     @Published private(set) var adapterValidationResult: String?
+    @Published private(set) var automaticScreenScaling = AutomaticScreenScaling()
 
     private let store = UserDefaults.standard
     private let backupKey = "managedPreferenceBackupsV1"
@@ -250,6 +271,32 @@ final class ManagedPreferences: ObservableObject {
 
     func isManagedApplicationEnabled(_ key: String) -> Bool { managedApplicationConfig[key] ?? false }
 
+    func managedApplicationRequiresQuit(_ key: String) -> Bool {
+        ConfigurationQuitPolicy.requiresQuit(for: key, overrides: managedApplicationQuitConfig)
+    }
+
+    func setManagedApplicationRequiresQuit(_ enabled: Bool, key: String) {
+        updateAdapterConfiguration { document in
+            var policies = document.managedApplicationRequiresQuit ?? [:]
+            policies[key] = enabled
+            document.managedApplicationRequiresQuit = policies
+        }
+    }
+
+    func setJSONAdapterRequiresQuit(_ enabled: Bool, index: Int) {
+        updateAdapterConfiguration { document in
+            guard document.adapters.indices.contains(index) else { return }
+            document.adapters[index].requiresQuit = enabled
+        }
+    }
+
+    func setJSONAdapterEnabled(_ enabled: Bool, index: Int) {
+        updateAdapterConfiguration { document in
+            guard document.adapters.indices.contains(index) else { return }
+            document.adapters[index].enabled = enabled
+        }
+    }
+
     func setManagedApplicationEnabled(_ enabled: Bool, key: String) {
         updateAdapterConfiguration { document in
             var applications = document.managedApplications ?? [:]
@@ -258,23 +305,98 @@ final class ManagedPreferences: ObservableObject {
         }
     }
 
+    func setAutomaticScreenScaling(applications: Bool? = nil, dock: Bool? = nil, restartConfigurationApplications: Bool? = nil) {
+        updateAdapterConfiguration { document in
+            var options = document.automaticScreenScaling ?? AutomaticScreenScaling()
+            if let applications { options.applications = applications }
+            if let dock { options.dock = dock }
+            if let restartConfigurationApplications { options.restartConfigurationApplications = restartConfigurationApplications }
+            document.automaticScreenScaling = options
+        }
+    }
+
+    var screenConfigurationTargets: [ScreenConfigurationTarget] {
+        let builtIns: [(String, String)] = [
+            ("vscode", "com.microsoft.VSCode"), ("chrome", "com.google.Chrome"),
+            ("edge", "com.microsoft.edgemac"), ("zotero", "org.zotero.zotero"),
+            ("notion", "notion.id"), ("claude", "com.anthropic.claude"), ("codex", "com.openai.codex")
+        ]
+        var result = builtIns.compactMap { key, bundleID -> ScreenConfigurationTarget? in
+            guard isManagedApplicationEnabled(key) else { return nil }
+            return ScreenConfigurationTarget(key: key, bundleIdentifier: bundleID,
+                name: configurationItemDefinitions[key]?.title ?? key,
+                requiresQuit: managedApplicationRequiresQuit(key) || configuredJSONAdapters.contains { $0.isEnabled && $0.bundleIdentifier == bundleID && $0.mustQuit })
+        }
+        for adapter in configuredJSONAdapters where adapter.isEnabled {
+            guard let id = adapter.bundleIdentifier, !result.contains(where: { $0.bundleIdentifier == id }) else { continue }
+            result.append(ScreenConfigurationTarget(key: nil, bundleIdentifier: id, name: adapter.name, requiresQuit: adapter.mustQuit))
+        }
+        return result
+    }
+
+    /// The coordinator must confirm normal termination first; never write a
+    /// quit-required file while its owner is running, regardless of manual mode.
+    func applyScreenConfiguration(_ target: ScreenConfigurationTarget, mode: ScaleMode) throws {
+        if target.requiresQuit { try ensureNotRunning(bundleIdentifier: target.bundleIdentifier, name: target.name) }
+        let profile = mode == .desktop ? desktopProfile : laptopProfile
+        switch target.key {
+        case "vscode": try updateVSCode(profile, captureBackups: true)
+        case "chrome": try updateChromium(named: "Google/Chrome", profile: profile, captureBackups: true)
+        case "edge": try updateChromium(named: "Microsoft Edge", profile: profile, captureBackups: true)
+        case "zotero": try updateZotero(profile, captureBackups: true)
+        case "notion": try updateElectron(profile, preferencesURL: home("Library/Application Support/Notion/Preferences"), captureBackups: true, updateExistingHosts: true)
+        case "claude": try updateElectron(profile, preferencesURL: home("Library/Application Support/Claude-3p/Preferences"), captureBackups: true, updateExistingHosts: false)
+        case "codex": try updateElectron(profile, preferencesURL: home("Library/Application Support/Codex/Default/Preferences"), captureBackups: true, updateExistingHosts: false)
+        default: break
+        }
+        try applyExternalJSONAdapters(configuredJSONAdapters.filter { $0.bundleIdentifier == target.bundleIdentifier }, profile: profile, captureBackups: true)
+    }
+
+    func automaticShortcutTarget(bundleIdentifier: String) -> CustomImmediateApp? {
+        guard immediateMode else { return nil }
+        return configuredImmediateAdapters.first { $0.bundleIdentifier == bundleIdentifier && $0.isEnabled }?.asImmediateApp()
+    }
+
+    /// Read once when encountering a browser process, avoiding a pointless
+    /// restart if its persisted global zoom is already the requested value.
+    func screenConfigurationMatches(_ target: ScreenConfigurationTarget, mode: ScaleMode) -> Bool {
+        guard target.key == "edge" || target.key == "chrome" else { return false }
+        let product = target.key == "edge" ? "Microsoft Edge" : "Google/Chrome"
+        let root = home("Library/Application Support/\(product)")
+        guard let children = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return false }
+        let files = children.filter { $0.lastPathComponent == "Default" || $0.lastPathComponent.hasPrefix("Profile ") }
+            .map { $0.appending(path: "Preferences") }.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !files.isEmpty else { return false }
+        let profile = mode == .desktop ? desktopProfile : laptopProfile
+        let level = log(Double(profile.browserZoomPercent) / 100) / log(1.2)
+        return files.allSatisfy { file in
+            guard let data = try? Data(contentsOf: file),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            let paths: [[String]] = [["default_zoom_level"], ["partition", "default_zoom_level", "x"]] + chromiumHostZoomPaths(json)
+            return paths.allSatisfy { path in
+                let actual = (value(at: path, in: json) as? NSNumber)?.doubleValue ?? 0
+                return abs(actual - level) < 0.00001
+            }
+        }
+    }
+
     /// Returns only apps that would make a configuration-file profile change unsafe.
     /// Unopened apps and immediate-shortcut targets intentionally do not appear here.
     func blockingApplicationsForProfileChange() -> [BlockingApplication] {
         guard let document = try? ExternalAdapterConfiguration.load() else { return [] }
         let configured = document.managedApplications ?? [:]
-        let candidates: [(String, String, Bool)] = [
-            ("VS Code", "com.microsoft.VSCode", configured["vscode"] ?? manageVSCode),
-            ("Google Chrome", "com.google.Chrome", configured["chrome"] ?? manageChrome),
-            ("Microsoft Edge", "com.microsoft.edgemac", configured["edge"] ?? manageEdge),
-            ("Zotero", "org.zotero.zotero", configured["zotero"] ?? manageZotero),
-            ("Notion", "notion.id", configured["notion"] ?? manageNotion),
-            ("Claude", "com.anthropic.claude", configured["claude"] ?? manageClaude),
-            ("Codex", "com.openai.codex", configured["codex"] ?? manageCodex)
+        let candidates: [(String, String, String, Bool)] = [
+            ("vscode", "VS Code", "com.microsoft.VSCode", configured["vscode"] ?? manageVSCode),
+            ("chrome", "Google Chrome", "com.google.Chrome", configured["chrome"] ?? manageChrome),
+            ("edge", "Microsoft Edge", "com.microsoft.edgemac", configured["edge"] ?? manageEdge),
+            ("zotero", "Zotero", "org.zotero.zotero", configured["zotero"] ?? manageZotero),
+            ("notion", "Notion", "notion.id", configured["notion"] ?? manageNotion),
+            ("claude", "Claude", "com.anthropic.claude", configured["claude"] ?? manageClaude),
+            ("codex", "Codex", "com.openai.codex", configured["codex"] ?? manageCodex)
         ]
         var result: [BlockingApplication] = []
         var seen = Set<String>()
-        for (name, bundleID, enabled) in candidates where enabled && seen.insert(bundleID).inserted {
+        for (key, name, bundleID, enabled) in candidates where enabled && ConfigurationQuitPolicy.requiresQuit(for: key, overrides: document.managedApplicationRequiresQuit) && seen.insert(bundleID).inserted {
             if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) {
                 result.append(BlockingApplication(name: name, application: app))
             }
@@ -430,7 +552,7 @@ final class ManagedPreferences: ObservableObject {
         updateAdapterConfiguration { document in
             var adapters = document.windowLayoutAdapters ?? []
             guard !adapters.contains(where: { $0.bundleIdentifier == trimmedBundleID }) else { return }
-            adapters.append(ExternalWindowLayoutAdapter(enabled: true, name: trimmedName, bundleIdentifier: trimmedBundleID, windowSizePercent: 75))
+            adapters.append(ExternalWindowLayoutAdapter(enabled: true, name: trimmedName, bundleIdentifier: trimmedBundleID, windowSizePercent: 75, layoutStyle: .centered, leftGapPercent: 10))
             document.windowLayoutAdapters = adapters
         }
     }
@@ -447,6 +569,17 @@ final class ManagedPreferences: ObservableObject {
 
     func setWindowLayoutSize(_ percent: Double, bundleIdentifier: String) {
         updateWindowLayoutAdapter(bundleIdentifier) { $0.windowSizePercent = min(max(percent, 30), 100) }
+    }
+
+    func setWindowLayoutStyle(_ style: WindowLayoutStyle, bundleIdentifier: String) {
+        updateWindowLayoutAdapter(bundleIdentifier) {
+            $0.layoutStyle = style
+            if $0.leftGapPercent == nil { $0.leftGapPercent = 10 }
+        }
+    }
+
+    func setWindowLayoutLeftGap(_ percent: Double, bundleIdentifier: String) {
+        updateWindowLayoutAdapter(bundleIdentifier) { $0.leftGapPercent = min(max(percent, 0), 40) }
     }
 
     private func updateWindowLayoutAdapter(_ bundleIdentifier: String, _ mutation: (inout ExternalWindowLayoutAdapter) -> Void) {
@@ -500,8 +633,11 @@ final class ManagedPreferences: ObservableObject {
             if let profile = document.laptopProfile { laptopProfile = profile }
             isReloadingAdapterConfiguration = false
             managedApplicationConfig = document.managedApplications ?? [:]
+            managedApplicationQuitConfig = document.managedApplicationRequiresQuit ?? [:]
+            configuredJSONAdapters = document.adapters
             configuredImmediateAdapters = document.immediateAdapters ?? []
             configuredWindowLayoutAdapters = document.windowLayoutAdapters ?? []
+            automaticScreenScaling = document.automaticScreenScaling ?? AutomaticScreenScaling()
             adapterConfigurationError = nil
         } catch {
             isReloadingAdapterConfiguration = false
@@ -535,8 +671,11 @@ final class ManagedPreferences: ObservableObject {
             mutation(&document)
             try ExternalAdapterConfiguration.save(document)
             managedApplicationConfig = document.managedApplications ?? [:]
+            managedApplicationQuitConfig = document.managedApplicationRequiresQuit ?? [:]
+            configuredJSONAdapters = document.adapters
             configuredImmediateAdapters = document.immediateAdapters ?? []
             configuredWindowLayoutAdapters = document.windowLayoutAdapters ?? []
+            automaticScreenScaling = document.automaticScreenScaling ?? AutomaticScreenScaling()
             adapterConfigurationError = nil
         } catch { adapterConfigurationError = error.localizedDescription }
     }
@@ -598,14 +737,14 @@ final class ManagedPreferences: ObservableObject {
         try TerminalController.setDefaultFontSize(size)
     }
 
-    func apply(profile: ScaleProfile, captureBackups: Bool = true) throws {
+    func apply(profile: ScaleProfile, captureBackups: Bool = true, respectScreenScaling: Bool = true) throws {
         let adapterDocument = try ExternalAdapterConfiguration.load()
         let externalAdapters = adapterDocument.adapters
         let managedApplications = adapterDocument.managedApplications
         let useVSCode = managedApplications?["vscode"] ?? manageVSCode
         let useChrome = managedApplications?["chrome"] ?? manageChrome
         let useEdge = managedApplications?["edge"] ?? manageEdge
-        let useDock = managedApplications?["dock"] ?? manageDock
+        let useDock = (managedApplications?["dock"] ?? manageDock) && !(respectScreenScaling && automaticScreenScaling.dock)
         let useCursor = managedApplications?["cursor"] ?? manageCursor
         let useZotero = managedApplications?["zotero"] ?? manageZotero
         let useNotion = managedApplications?["notion"] ?? manageNotion
@@ -617,22 +756,34 @@ final class ManagedPreferences: ObservableObject {
         // Chromium keeps Preferences in memory and rewrites the file on exit.
         // Writing it while the browser is open makes a successful-looking change
         // disappear, so fail before touching any managed configuration.
-        if useChrome { try ensureNotRunning(bundleIdentifier: "com.google.Chrome", name: "Google Chrome") }
-        if useEdge { try ensureNotRunning(bundleIdentifier: "com.microsoft.edgemac", name: "Microsoft Edge") }
-        if useZotero { try ensureNotRunning(bundleIdentifier: "org.zotero.zotero", name: "Zotero") }
-        if useNotion { try ensureNotRunning(bundleIdentifier: "notion.id", name: "Notion") }
-        if useClaude { try ensureNotRunning(bundleIdentifier: "com.anthropic.claude", name: "Claude") }
-        if useCodex { try ensureNotRunning(bundleIdentifier: "com.openai.codex", name: "Codex") }
-        if useVSCode { try updateVSCode(profile, captureBackups: captureBackups) }
-        if useChrome { try updateChromium(named: "Google/Chrome", profile: profile, captureBackups: captureBackups) }
-        if useEdge { try updateChromium(named: "Microsoft Edge", profile: profile, captureBackups: captureBackups) }
+        let quitPolicy = adapterDocument.managedApplicationRequiresQuit
+        if useVSCode && ConfigurationQuitPolicy.requiresQuit(for: "vscode", overrides: quitPolicy) { try ensureNotRunning(bundleIdentifier: "com.microsoft.VSCode", name: "VS Code") }
+        if useChrome && ConfigurationQuitPolicy.requiresQuit(for: "chrome", overrides: quitPolicy) { try ensureNotRunning(bundleIdentifier: "com.google.Chrome", name: "Google Chrome") }
+        if useEdge && ConfigurationQuitPolicy.requiresQuit(for: "edge", overrides: quitPolicy) { try ensureNotRunning(bundleIdentifier: "com.microsoft.edgemac", name: "Microsoft Edge") }
+        if useZotero && ConfigurationQuitPolicy.requiresQuit(for: "zotero", overrides: quitPolicy) { try ensureNotRunning(bundleIdentifier: "org.zotero.zotero", name: "Zotero") }
+        if useNotion && ConfigurationQuitPolicy.requiresQuit(for: "notion", overrides: quitPolicy) { try ensureNotRunning(bundleIdentifier: "notion.id", name: "Notion") }
+        if useClaude && ConfigurationQuitPolicy.requiresQuit(for: "claude", overrides: quitPolicy) { try ensureNotRunning(bundleIdentifier: "com.anthropic.claude", name: "Claude") }
+        if useCodex && ConfigurationQuitPolicy.requiresQuit(for: "codex", overrides: quitPolicy) { try ensureNotRunning(bundleIdentifier: "com.openai.codex", name: "Codex") }
+        let snapshot = respectScreenScaling && automaticScreenScaling.applications ? ScreenScalingSnapshot.capture() : nil
+        func applicationProfile(_ bundleID: String) -> ScaleProfile {
+            guard let snapshot,
+                  let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
+                  let frame = snapshot.applications[app.processIdentifier],
+                  let display = ScreenScalingPolicy.display(for: frame, displays: snapshot.displays) else { return profile }
+            return display.builtIn ? laptopProfile : desktopProfile
+        }
+        if useVSCode { try updateVSCode(applicationProfile("com.microsoft.VSCode"), captureBackups: captureBackups) }
+        if useChrome { try updateChromium(named: "Google/Chrome", profile: applicationProfile("com.google.Chrome"), captureBackups: captureBackups) }
+        if useEdge { try updateChromium(named: "Microsoft Edge", profile: applicationProfile("com.microsoft.edgemac"), captureBackups: captureBackups) }
         if useDock { try setDefault(domain: "com.apple.dock", key: "tilesize", value: profile.dockSize, captureBackups: captureBackups) }
         if useCursor { try setDefault(domain: "com.apple.universalaccess", key: "mouseDriverCursorSize", value: profile.cursorSize, captureBackups: captureBackups) }
-        if useZotero { try updateZotero(profile, captureBackups: captureBackups) }
-        if useNotion { try updateElectron(profile, preferencesURL: home("Library/Application Support/Notion/Preferences"), captureBackups: captureBackups, updateExistingHosts: true) }
-        if useClaude { try updateElectron(profile, preferencesURL: home("Library/Application Support/Claude-3p/Preferences"), captureBackups: captureBackups, updateExistingHosts: false) }
-        if useCodex { try updateElectron(profile, preferencesURL: home("Library/Application Support/Codex/Default/Preferences"), captureBackups: captureBackups, updateExistingHosts: false) }
-        try applyExternalJSONAdapters(externalAdapters, profile: profile, captureBackups: captureBackups)
+        if useZotero { try updateZotero(applicationProfile("org.zotero.zotero"), captureBackups: captureBackups) }
+        if useNotion { try updateElectron(applicationProfile("notion.id"), preferencesURL: home("Library/Application Support/Notion/Preferences"), captureBackups: captureBackups, updateExistingHosts: true) }
+        if useClaude { try updateElectron(applicationProfile("com.anthropic.claude"), preferencesURL: home("Library/Application Support/Claude-3p/Preferences"), captureBackups: captureBackups, updateExistingHosts: false) }
+        if useCodex { try updateElectron(applicationProfile("com.openai.codex"), preferencesURL: home("Library/Application Support/Codex/Default/Preferences"), captureBackups: captureBackups, updateExistingHosts: false) }
+        for adapter in externalAdapters {
+            try applyExternalJSONAdapters([adapter], profile: adapter.bundleIdentifier.map(applicationProfile) ?? profile, captureBackups: captureBackups)
+        }
     }
 
     private func applyExternalJSONAdapters(_ adapters: [ExternalJSONAdapter], profile: ScaleProfile, captureBackups: Bool) throws {
@@ -656,11 +807,11 @@ final class ManagedPreferences: ObservableObject {
         saveBackups(backups)
     }
 
-    func applyLaptopProfile() throws {
+    func applyLaptopProfile(respectScreenScaling: Bool = true) throws {
         // Laptop Mode is a defined baseline, not a replay of an old backup. Some
         // earlier backups captured a Desktop zoom value, which could otherwise
         // leave Chromium browsers at 125% instead of the Laptop 100% target.
-        try apply(profile: laptopProfile, captureBackups: false)
+        try apply(profile: laptopProfile, captureBackups: false, respectScreenScaling: respectScreenScaling)
     }
 
     private func updateVSCode(_ profile: ScaleProfile, captureBackups: Bool) throws {
@@ -680,11 +831,38 @@ final class ManagedPreferences: ObservableObject {
         for directory in children where directory.lastPathComponent == "Default" || directory.lastPathComponent.hasPrefix("Profile ") {
             // Recent Chromium builds use the partition value. The top-level value is
             // retained for older Chrome/Edge profiles that still read it.
-            try updateJSON(url: directory.appending(path: "Preferences"), paths: [
+            let url = directory.appending(path: "Preferences")
+            var paths: [([String], Any)] = [
                 (["default_zoom_level"], level),
                 (["partition", "default_zoom_level", "x"], level)
-            ], captureBackups: captureBackups)
+            ]
+            if let data = try? Data(contentsOf: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                paths += chromiumHostZoomPaths(json).map { ($0, level) }
+            }
+            try updateJSON(url: url, paths: paths, captureBackups: captureBackups)
         }
+    }
+
+    private func chromiumHostZoomPaths(_ json: [String: Any]) -> [[String]] {
+        var result: [[String]] = []
+        if let partition = json["partition"] as? [String: Any],
+           let groups = partition["per_host_zoom_levels"] as? [String: Any] {
+            for (group, hosts) in groups {
+                guard let hosts = hosts as? [String: Any] else { continue }
+                for (host, entry) in hosts {
+                    if let entry = entry as? [String: Any], entry["zoom_level"] is NSNumber {
+                        result.append(["partition", "per_host_zoom_levels", group, host, "zoom_level"])
+                    } else if entry is NSNumber {
+                        result.append(["partition", "per_host_zoom_levels", group, host])
+                    }
+                }
+            }
+        }
+        if let hosts = json["per_host_zoom_levels"] as? [String: Any] {
+            for (host, value) in hosts where value is NSNumber { result.append(["per_host_zoom_levels", host]) }
+        }
+        return result
     }
 
     private func updateElectron(_ profile: ScaleProfile, preferencesURL: URL, captureBackups: Bool, updateExistingHosts: Bool) throws {
@@ -760,9 +938,13 @@ final class ManagedPreferences: ObservableObject {
         if captureBackups {
             captureIfNeeded(id: backupID, entry: .defaults(domain: domain, key: key, value: JSONValue(defaults?.object(forKey: key))))
         }
+        if domain == "com.apple.dock", key == "tilesize", let size = value as? Int,
+           LiveDockSizeController().apply(points: size) { return }
         defaults?.set(value, forKey: key)
         defaults?.synchronize()
-        if domain == "com.apple.dock" { try run("/usr/bin/killall", ["Dock"], failureIsFatal: false) }
+        if domain == "com.apple.dock" {
+            try run("/usr/bin/killall", ["Dock"], failureIsFatal: false)
+        }
     }
 
     private func restore(_ entry: BackupEntry) throws {

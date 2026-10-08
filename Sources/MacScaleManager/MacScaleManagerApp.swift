@@ -18,11 +18,23 @@ struct MacScaleManagerApp: App {
     }
 }
 
+@MainActor
+enum AppTerminationCoordinator {
+    static var manager: ScaleManager?
+
+    static func restoreLaptopModeAndEnableBuiltInDisplay() {
+        manager?.prepareForTermination()
+        _ = DisplayController.setBuiltInDisplay(enabled: true)
+    }
+}
+
 final class MacScaleManagerApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
-        // Leaving an internal display disabled is unsafe: an external display
-        // can disconnect while the menu-bar helper is no longer available.
-        _ = DisplayController.setBuiltInDisplay(enabled: true)
+        // Termination must leave the machine usable on its built-in screen and
+        // restore the normal Laptop workspace, even when quitting via ⌘Q.
+        MainActor.assumeIsolated {
+            AppTerminationCoordinator.restoreLaptopModeAndEnableBuiltInDisplay()
+        }
     }
 }
 
@@ -80,8 +92,19 @@ private struct MenuContent: View {
         Button { manager.requestApply(.desktop) } label: {
             Label("Desktop Mode", systemImage: manager.currentMode == .desktop ? "checkmark.circle.fill" : "circle")
         }
-        Button("只同步当前前台应用") { manager.syncFrontmostImmediateApp() }
+        Button("只调整当前应用窗口") { manager.syncFrontmostWindow() }
+        Button("只调整当前应用字体/缩放") { manager.syncFrontmostScaling() }
+        Menu("按屏幕自动缩放状态") {
+            ForEach(Array(manager.automaticScalingStatus.components(separatedBy: "；").enumerated()), id: \.offset) { _, line in
+                Text(line).font(.caption)
+            }
+        }
         if let result = manager.lastImmediateResult {
+            Text(result)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if let result = manager.lastWindowLayoutResult {
             Text(result)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -96,7 +119,6 @@ private struct MenuContent: View {
         Button("Settings…") { manager.openSettings() }
         Divider()
         Button("Quit") {
-            _ = DisplayController.setBuiltInDisplay(enabled: true)
             NSApplication.shared.terminate(nil)
         }
     }

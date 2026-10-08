@@ -10,6 +10,8 @@ jq empty "$config_file"
 # Keep shortcut rules within the limits enforced by the app, so a hand-edited
 # config cannot create an unexpectedly long or repeated shortcut sequence.
 jq -e '
+  ((.automaticScreenScaling // {"applications": false, "dock": false}) | (.applications | type == "boolean") and (.dock | type == "boolean")) and
+  ((.managedApplicationRequiresQuit // {}) | all(.[]; type == "boolean")) and
   all(.immediateAdapters[]?;
     (.bundleIdentifier | type == "string" and length > 0) and
     ((.desktopZoomSteps // 2) >= 1 and (.desktopZoomSteps // 2) <= 6) and
@@ -18,9 +20,20 @@ jq -e '
   ) and
   all(.windowLayoutAdapters[]?;
     (.bundleIdentifier | type == "string" and length > 0) and
-    ((.windowSizePercent // 75) >= 30 and (.windowSizePercent // 75) <= 100)
+    ((.windowSizePercent // 75) >= 30 and (.windowSizePercent // 75) <= 100) and
+    ((.layoutStyle // "centered") | . == "centered" or . == "fillWithLeftGap") and
+    ((.leftGapPercent // 10) >= 0 and (.leftGapPercent // 10) <= 40)
   )
 ' "$config_file" >/dev/null
 
 swift build -c debug --package-path "$source_dir" >/dev/null
+test_dir=${source_dir}/work/regression-tests
+mkdir -p "$test_dir"
+swiftc "$source_dir/Sources/MacScaleManager/WindowLayoutGeometry.swift" \
+  "$source_dir/Sources/MacScaleManager/ConfigurationQuitPolicy.swift" \
+  "$script_dir/tests/window-layout/main.swift" -o "$test_dir/layout-tests"
+"$test_dir/layout-tests"
+swiftc "$source_dir/Sources/MacScaleManager/ScreenScalingPolicy.swift" \
+  "$script_dir/tests/screen-scaling/main.swift" -o "$test_dir/screen-tests"
+"$test_dir/screen-tests"
 print 'MacScaleManager regression checks passed.'

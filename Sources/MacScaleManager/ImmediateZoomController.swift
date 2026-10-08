@@ -55,7 +55,7 @@ struct ImmediateZoomController {
     private struct ShortcutRequest {
         let name: String
         let bundleIdentifier: String
-        let perform: () -> Void
+        let perform: () -> Bool
     }
 
     static func requestAccessibilityPermission() -> Bool {
@@ -66,7 +66,7 @@ struct ImmediateZoomController {
         applyWithResult(mode: mode, targets: targets, customTargets: customTargets, zoomSteps: zoomSteps, laptopActions: laptopActions).summary
     }
 
-    static func applyWithResult(mode: ScaleMode, targets: [ImmediateTarget], customTargets: [CustomImmediateApp] = [], zoomSteps: [String: Int] = [:], laptopActions: [String: String] = [:]) -> ImmediateZoomResult {
+    static func applyWithResult(mode: ScaleMode, targets: [ImmediateTarget], customTargets: [CustomImmediateApp] = [], zoomSteps: [String: Int] = [:], laptopActions: [String: String] = [:], foregroundOnly: Bool = false) -> ImmediateZoomResult {
         guard AXIsProcessTrusted() else { return ImmediateZoomResult(unavailableNames: ["请在系统设置中授予 MacScaleManager 辅助功能权限"]) }
         let original = NSWorkspace.shared.frontmostApplication
         let applications = NSWorkspace.shared.runningApplications
@@ -79,10 +79,11 @@ struct ImmediateZoomController {
                     desktopZoomSteps: zoomSteps[target.rawValue] ?? (target == .codex ? 3 : 2),
                     laptopAction: CustomLaptopAction(rawValue: laptopActions[target.rawValue] ?? "reset") ?? .reset
                 )
+                return true
             }
         } + customTargets.map { target in
             ShortcutRequest(name: target.name, bundleIdentifier: target.bundleIdentifier) {
-                applyShortcut(for: target, mode: mode)
+                applyShortcut(for: target, mode: mode, expectedPID: foregroundOnly ? original?.processIdentifier : nil)
             }
         }
         for request in requests {
@@ -90,15 +91,18 @@ struct ImmediateZoomController {
                 result.unavailableNames.append(request.name)
                 continue
             }
-            guard focusForKeyboardInput(application) else {
+            guard foregroundOnly ? (NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier) : focusForKeyboardInput(application) else {
                 result.unavailableNames.append("\(request.name)（无法置前）")
                 continue
             }
-            request.perform()
+            guard request.perform() else {
+                result.unavailableNames.append("\(request.name)（焦点或鼠标状态变化，已停止）")
+                continue
+            }
             result.changedNames.append(request.name)
             result.changedBundleIdentifiers.append(request.bundleIdentifier)
         }
-        if let original { original.activate(options: [.activateAllWindows]) }
+        if !foregroundOnly, let original { original.activate(options: [.activateAllWindows]) }
         return result
     }
 
@@ -115,18 +119,27 @@ struct ImmediateZoomController {
         }
     }
 
-    private static func applyShortcut(for target: CustomImmediateApp, mode: ScaleMode) {
+    private static func applyShortcut(for target: CustomImmediateApp, mode: ScaleMode, expectedPID: pid_t? = nil) -> Bool {
+        let interval = min(max(target.shortcutIntervalSeconds ?? 0.25, 0.1), 1.0)
+        func send(_ code: CGKeyCode) -> Bool {
+            if let expectedPID {
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == expectedPID,
+                      !CGEventSource.buttonState(.combinedSessionState, button: .left),
+                      !CGEventSource.buttonState(.combinedSessionState, button: .right) else { return false }
+            }
+            postShortcut(keyCode: code, settleInterval: interval)
+            return true
+        }
         if mode == .laptop {
-            if target.laptopAction == .reset { postShortcut(keyCode: 0x1D) }
+            if target.laptopAction == .reset { return send(0x1D) }
             else {
-                let interval = min(max(target.shortcutIntervalSeconds ?? 0.25, 0.1), 1.0)
-                for _ in 0..<max(1, target.desktopZoomSteps) { postShortcut(keyCode: 0x1B, settleInterval: interval) }
+                for _ in 0..<min(max(0, target.desktopZoomSteps), 6) { if !send(0x1B) { return false } }
             }
         } else {
-            if target.resetBeforeDesktop ?? false { postShortcut(keyCode: 0x1D) }
-            let interval = min(max(target.shortcutIntervalSeconds ?? 0.25, 0.1), 1.0)
-            for _ in 0..<max(1, target.desktopZoomSteps) { postShortcut(keyCode: 0x18, settleInterval: interval) }
+            if target.resetBeforeDesktop ?? false, !send(0x1D) { return false }
+            for _ in 0..<min(max(0, target.desktopZoomSteps), 6) { if !send(0x18) { return false } }
         }
+        return true
     }
 
     private static func waitUntilFrontmost(_ application: NSRunningApplication) -> Bool {

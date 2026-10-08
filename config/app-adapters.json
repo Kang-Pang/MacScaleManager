@@ -17,6 +17,11 @@
       ]
     }
   ],
+  "automaticScreenScaling" : {
+    "applications" : true,
+    "dock" : true,
+    "restartConfigurationApplications" : true
+  },
   "desktopProfile" : {
     "browserZoomPercent" : 125,
     "cursorSize" : 1.35,
@@ -86,6 +91,15 @@
     "terminalFontSize" : 13,
     "vscodeZoom" : 0
   },
+  "managedApplicationRequiresQuit" : {
+    "chrome" : true,
+    "claude" : true,
+    "codex" : true,
+    "edge" : true,
+    "notion" : true,
+    "vscode" : false,
+    "zotero" : true
+  },
   "managedApplications" : {
     "chrome" : true,
     "claude" : false,
@@ -102,30 +116,40 @@
     {
       "bundleIdentifier" : "com.tencent.qq",
       "enabled" : true,
+      "layoutStyle" : "centered",
+      "leftGapPercent" : 10,
       "name" : "QQ",
       "windowSizePercent" : 75
     },
     {
       "bundleIdentifier" : "com.tencent.xinWeChat",
       "enabled" : true,
+      "layoutStyle" : "centered",
+      "leftGapPercent" : 10,
       "name" : "微信",
       "windowSizePercent" : 70
     },
     {
       "bundleIdentifier" : "com.openai.codex",
       "enabled" : true,
+      "layoutStyle" : "centered",
+      "leftGapPercent" : 10,
       "name" : "Codex",
       "windowSizePercent" : 75
     },
     {
       "bundleIdentifier" : "notion.id",
       "enabled" : true,
+      "layoutStyle" : "centered",
+      "leftGapPercent" : 10,
       "name" : "Notion",
       "windowSizePercent" : 75
     },
     {
       "bundleIdentifier" : "com.apple.Terminal",
       "enabled" : true,
+      "layoutStyle" : "centered",
+      "leftGapPercent" : 10,
       "name" : "Terminal",
       "windowSizePercent" : 60
     }

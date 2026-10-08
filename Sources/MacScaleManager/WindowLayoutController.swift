@@ -7,16 +7,36 @@ enum WindowLayoutResult {
     case failed(String)
 }
 
-/// Resizes only normal Accessibility windows. Full-screen, minimized and
-/// non-resizable windows are left untouched so layout never breaks a user's
-/// presentation, Split View, or an app-owned window arrangement.
+/// Batch layouts preserve native full-screen windows. The centered style also
+/// preserves filled windows; the left-gap style can rearrange them explicitly.
+/// Manual sync may leave full-screen; minimized/non-resizable windows stay put.
 enum WindowLayoutController {
-    static func apply(to application: NSRunningApplication, sizeFraction: CGFloat, force: Bool = false) -> WindowLayoutResult {
+    /// Reopening a quit-required app may lose its display placement. Restore
+    /// only its former position, not its size or native full-screen state.
+    static func restorePosition(of application: NSRunningApplication, origin: CGPoint) -> Bool {
+        guard AXIsProcessTrusted(), let window = focusedWindow(of: AXUIElementCreateApplication(application.processIdentifier)),
+              !isNativeFullScreen(window), isSettable(kAXPositionAttribute as CFString, of: window) else { return false }
+        var point = origin
+        guard let value = AXValueCreate(.cgPoint, &point) else { return false }
+        return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value) == .success
+    }
+
+    static func apply(to application: NSRunningApplication, adapter: ExternalWindowLayoutAdapter,
+                      force: Bool = false) -> WindowLayoutResult {
+        apply(to: application, sizeFraction: adapter.sizeFraction, style: adapter.style,
+              leftGapFraction: adapter.leftGapFraction, force: force)
+    }
+
+    static func apply(to application: NSRunningApplication, sizeFraction: CGFloat,
+                      style: WindowLayoutStyle = .centered, leftGapFraction: CGFloat = 0.1,
+                      force: Bool = false) -> WindowLayoutResult {
         guard AXIsProcessTrusted() else { return .failed("未授予辅助功能权限") }
         let appElement = AXUIElementCreateApplication(application.processIdentifier)
         guard let window = focusedWindow(of: appElement) else { return .skipped("没有可调整的窗口") }
 
-        if !force && isFullScreen(window) { return .skipped("窗口处于全屏或最大化状态") }
+        if !force && (isNativeFullScreen(window) || (style == .centered && isFullScreen(window))) {
+            return .skipped("窗口处于全屏或最大化状态")
+        }
         if force && boolAttribute("AXFullScreen" as CFString, of: window) == true {
             guard isSettable("AXFullScreen" as CFString, of: window) else { return .failed("应用不允许退出原生全屏") }
             guard AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, kCFBooleanFalse) == .success else {
@@ -30,17 +50,19 @@ enum WindowLayoutController {
         }
 
         guard let screen = targetScreen(for: window) else { return .failed("无法确定目标屏幕") }
-        let fraction = min(max(sizeFraction, 0.3), 1.0)
-        let frame = screen.visibleFrame
-        var size = CGSize(width: floor(frame.width * fraction), height: floor(frame.height * fraction))
-        let appKitOrigin = CGPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2)
+        let frame = WindowLayoutGeometry.frame(screen: screen.frame, visible: screen.visibleFrame,
+                                              style: style, sizeFraction: sizeFraction,
+                                              leftGapFraction: leftGapFraction)
+        var size = frame.size
         // Accessibility uses a top-left desktop origin, while AppKit uses a
         // bottom-left origin. Convert before sending the AX position.
-        var origin = CGPoint(x: appKitOrigin.x, y: desktopTop - appKitOrigin.y - size.height)
+        var origin = CGPoint(x: frame.minX, y: desktopTop - frame.maxY)
         guard let position = AXValueCreate(.cgPoint, &origin),
               let windowSize = AXValueCreate(.cgSize, &size) else { return .failed("无法生成窗口尺寸") }
-        let positionResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+        // Shrink before moving so an old full-width window can move right
+        // without macOS clamping its origin against the screen's right edge.
         let sizeResult = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, windowSize)
+        let positionResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
         return positionResult == .success && sizeResult == .success ? .changed : .failed("应用拒绝了窗口尺寸请求")
     }
 
@@ -76,12 +98,17 @@ enum WindowLayoutController {
         return NSScreen.main ?? NSScreen.screens.first
     }
 
-    private static func isFullScreen(_ window: AXUIElement) -> Bool {
+    private static func isNativeFullScreen(_ window: AXUIElement) -> Bool {
         if boolAttribute("AXFullScreen" as CFString, of: window) == true { return true }
         var subroleValue: CFTypeRef?
         if AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue) == .success,
            let subrole = subroleValue as? String,
            subrole == "AXFullScreenWindow" { return true }
+        return false
+    }
+
+    private static func isFullScreen(_ window: AXUIElement) -> Bool {
+        if isNativeFullScreen(window) { return true }
         guard let screen = targetScreen(for: window), let size = size(of: window) else { return false }
         // Dragging a macOS window to the top uses the "zoom/fill" state rather
         // than AXFullScreen. Chromium-style title bars and multi-display
