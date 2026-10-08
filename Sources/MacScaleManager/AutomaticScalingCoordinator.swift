@@ -6,6 +6,12 @@ final class AutomaticScalingCoordinator {
     private let preferences: ManagedPreferences
     private let monitor = ScreenScalingController()
     private let dock = LiveDockSizeController()
+    private var windowFollowing = AutomaticWindowLayoutPolicy()
+    private let windowSampler = FollowingWindowSampler()
+    private var lastWindowStatus = "窗口跟随：等待换屏或 Dock 可用区域变化"
+    private var dockLayoutNotBefore: TimeInterval = 0
+    private let diagnoseWorkArea = CommandLine.arguments.contains("--diagnose-work-area")
+    private var lastWorkAreaDiagnostic = ""
     private var subscription: AnyCancellable?
     private var configured: [String: String] = [:]
     private var configurationChecks: [String: String] = [:]
@@ -38,7 +44,7 @@ final class AutomaticScalingCoordinator {
         let options = preferences.automaticScreenScaling
         if !options.applications || !options.allowsConfigurationRestart { restartConfirmation?.dismiss() }
         monitor.setEnabled(options.applications || (options.dock && preferences.isManagedApplicationEnabled("dock")))
-        if !options.applications { applicationStatuses.removeAll() }
+        if !options.applications { applicationStatuses.removeAll(); windowFollowing.reset(); windowSampler.reset() }
         publishStatus()
     }
 
@@ -109,14 +115,58 @@ final class AutomaticScalingCoordinator {
                 candidateKeys.insert(key)
                 if stability.ready(key: key, candidate: StableScreenCandidate(displayID: display.id, frame: frame), now: now, mouseDown: mouseDown) {
                     let size = display.builtIn ? preferences.laptopProfile.dockSize : preferences.desktopProfile.dockSize
+                    let revision = dock.revision
                     lastDockStatus = dock.apply(points: size)
                         ? "Dock：\(display.builtIn ? "内屏" : "外屏") \(size)"
                         : "Dock：当前系统不支持实时大小接口，未重启 Dock"
+                    if dock.revision != revision {
+                        // Never lay out against a pre-setter snapshot. Let the
+                        // preference/work-area update and Dock animation settle.
+                        dockLayoutNotBefore = now + 1
+                    }
                 }
             } else { lastDockStatus = "Dock：位置暂不可确认，保持原大小" }
         }
 
         if options.applications {
+            // Window rules are independent from shortcut/configuration rules.
+            // Reuse this snapshot and timer; AX is touched only on a real
+            // settled display/work-area transition, never on every idle poll.
+            var windowRules: [Int32: FollowingWindowRule] = [:]
+            var windowApps: [Int32: NSRunningApplication] = [:]
+            for app in running where app.activationPolicy == .regular {
+                guard let id = app.bundleIdentifier, id != pendingRestartBundleID,
+                      let adapter = preferences.configuredWindowLayoutAdapters.first(where: { $0.bundleIdentifier == id && $0.isEnabled }) else { continue }
+                windowRules[app.processIdentifier] = FollowingWindowRule(sizeFraction: adapter.sizeFraction,
+                    leftGapFraction: adapter.style == .fillWithLeftGap ? adapter.leftGapFraction : nil)
+                windowApps[app.processIdentifier] = app
+            }
+            let layoutBlocked = mouseDown || modifierDown || now < dockLayoutNotBefore || !snapshot.layoutWorkAreaStable
+            let realWindows = windowSampler.sample(applications: windowApps, snapshot: snapshot, blocked: layoutBlocked, now: now)
+            let requests = windowFollowing.update(windows: realWindows, displays: snapshot.displays,
+                rules: windowRules, mouseDown: layoutBlocked, now: now)
+            for request in requests {
+                guard let app = windowApps[request.window.processID] else { continue }
+                let name = app.localizedName ?? app.bundleIdentifier ?? "应用"
+                let result = WindowLayoutController.applyFollowing(to: app, request: request)
+                if diagnoseWorkArea {
+                    print("WINDOW \(name) from=\(request.window.frame) target=\(request.targetFrame) result=\(String(describing: result))")
+                    fflush(stdout)
+                }
+                var retry = false
+                switch result {
+                case .changed:
+                    windowSampler.invalidate(processID: app.processIdentifier)
+                    lastWindowStatus = "窗口跟随：\(name) 已\(request.preservePosition ? "调整大小，保留位置" : "适应屏幕可用区域")"
+                case .skipped(let reason): lastWindowStatus = "窗口跟随：\(name) 跳过（\(reason)）"
+                case .failed(let reason): lastWindowStatus = "窗口跟随：\(name) 失败（\(reason)）"
+                case .deferred(let reason):
+                    retry = true
+                    windowSampler.deferRefresh(processID: app.processIdentifier, now: now)
+                    lastWindowStatus = "窗口跟随：\(name)（\(reason)）"
+                }
+                windowFollowing.complete(request, retry: retry)
+            }
             let targets = preferences.screenConfigurationTargets
             for app in running where app.activationPolicy == .regular {
                 guard let id = app.bundleIdentifier, let frame = snapshot.applications[app.processIdentifier],
@@ -180,6 +230,15 @@ final class AutomaticScalingCoordinator {
             }
         }
         stability.retain(keys: candidateKeys)
+        if diagnoseWorkArea {
+            let frames = snapshot.displays.map { "\($0.id):\($0.usableFrame)" }.joined(separator: " ")
+            let message = "AX=\(AXIsProcessTrusted()) liveDock=\(dock.currentPoints ?? -1) stable=\(snapshot.layoutWorkAreaStable) \(DockWorkAreaController.shared.diagnosticDescription) workAreas=\(frames)"
+            if message != lastWorkAreaDiagnostic {
+                print(message)
+                fflush(stdout)
+                lastWorkAreaDiagnostic = message
+            }
+        }
         publishStatus()
     }
 
@@ -393,7 +452,11 @@ final class AutomaticScalingCoordinator {
     private func publishStatus() {
         let options = preferences.automaticScreenScaling
         var parts: [String] = []
-        if options.applications { parts.append("应用按屏幕自动缩放"); parts += applicationStatuses.sorted { $0.key < $1.key }.map(\.value) }
+        if options.applications {
+            parts.append("应用按屏幕自动缩放")
+            if preferences.configuredWindowLayoutAdapters.contains(where: \.isEnabled) { parts.append(lastWindowStatus) }
+            parts += applicationStatuses.sorted { $0.key < $1.key }.map(\.value)
+        }
         if options.dock && preferences.isManagedApplicationEnabled("dock") { parts.append(lastDockStatus) }
         statusChanged?(parts.isEmpty ? "按屏幕自动缩放未启用" : parts.joined(separator: "；"))
     }

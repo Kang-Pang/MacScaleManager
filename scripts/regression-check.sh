@@ -36,4 +36,9 @@ swiftc "$source_dir/Sources/MacScaleManager/WindowLayoutGeometry.swift" \
 swiftc "$source_dir/Sources/MacScaleManager/ScreenScalingPolicy.swift" \
   "$script_dir/tests/screen-scaling/main.swift" -o "$test_dir/screen-tests"
 "$test_dir/screen-tests"
+swiftc "$source_dir/Sources/MacScaleManager/ScreenScalingPolicy.swift" \
+  "$source_dir/Sources/MacScaleManager/AutomaticWindowLayoutPolicy.swift" \
+  "$source_dir/Sources/MacScaleManager/DockWorkAreaGeometry.swift" \
+  "$script_dir/tests/window-following/main.swift" -o "$test_dir/window-following-tests"
+"$test_dir/window-following-tests"
 print 'MacScaleManager regression checks passed.'

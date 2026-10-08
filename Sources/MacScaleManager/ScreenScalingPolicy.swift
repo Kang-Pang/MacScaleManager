@@ -14,6 +14,13 @@ struct ScalingDisplay: Equatable {
     let id: UInt32
     let frame: CGRect
     let builtIn: Bool
+    let visibleFrame: CGRect?
+
+    init(id: UInt32, frame: CGRect, builtIn: Bool, visibleFrame: CGRect? = nil) {
+        self.id = id; self.frame = frame; self.builtIn = builtIn; self.visibleFrame = visibleFrame
+    }
+
+    var usableFrame: CGRect { visibleFrame ?? frame }
 }
 
 enum ScreenScalingPolicy {

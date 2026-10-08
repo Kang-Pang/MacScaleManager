@@ -132,7 +132,7 @@
     {
       "bundleIdentifier" : "com.openai.codex",
       "enabled" : true,
-      "layoutStyle" : "centered",
+      "layoutStyle" : "fillWithLeftGap",
       "leftGapPercent" : 10,
       "name" : "Codex",
       "windowSizePercent" : 75
@@ -152,6 +152,22 @@
       "leftGapPercent" : 10,
       "name" : "Terminal",
       "windowSizePercent" : 60
+    },
+    {
+      "bundleIdentifier" : "com.microsoft.VSCode",
+      "enabled" : true,
+      "layoutStyle" : "fillWithLeftGap",
+      "leftGapPercent" : 10,
+      "name" : "Code",
+      "windowSizePercent" : 75
+    },
+    {
+      "bundleIdentifier" : "com.microsoft.edgemac",
+      "enabled" : true,
+      "layoutStyle" : "fillWithLeftGap",
+      "leftGapPercent" : 10,
+      "name" : "Microsoft Edge",
+      "windowSizePercent" : 75
     }
   ]
 }

@@ -6,6 +6,7 @@ func snapshot() {
     let defaults = UserDefaults(suiteName: "com.apple.dock")!
     defaults.synchronize()
     print("configuredTileSize=\(defaults.object(forKey: "tilesize") ?? "missing")")
+    print("temporaryTileSize=\(defaults.object(forKey: "temp-tilesize") ?? "missing")")
     for screen in NSScreen.screens {
         let display = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
         print("screen=\(screen.localizedName) id=\(display) builtIn=\(CGDisplayIsBuiltin(display)) frame=\(screen.frame) visible=\(screen.visibleFrame)")
@@ -24,6 +25,7 @@ func independentSnapshot() {
     probe.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
     probe.arguments = []
     do {
+        fflush(stdout)
         try probe.run()
         probe.waitUntilExit()
     } catch { print("independentSnapshotError=\(error)") }
@@ -35,7 +37,11 @@ defer { dlclose(handle) }
 guard let getSymbol = dlsym(handle, "CoreDockGetTileSize"),
       let setSymbol = dlsym(handle, "CoreDockSetTileSize") else { fatalError("Live Dock size API is unavailable") }
 let getSize = unsafeBitCast(getSymbol, to: (@convention(c) () -> Float).self)
-let setSize = unsafeBitCast(setSymbol, to: (@convention(c) (Float) -> Void).self)
+// Current DesktopSettings passes a second boolean argument: the old public
+// examples omit it. Test preview vs committed updates without restarting Dock.
+let setSizeWithCommit = unsafeBitCast(setSymbol, to: (@convention(c) (Float, Bool) -> Void).self)
+let savePreference = !CommandLine.arguments.contains("--preview-dock-size")
+func setSize(_ value: Float) { setSizeWithCommit(value, savePreference) }
 let original = getSize()
 print("normalizedSize=\(original)")
 snapshot()
