@@ -2,7 +2,56 @@ import AppKit
 import CoreGraphics
 import Darwin
 
-struct ScreenScalingSnapshot {
+/// Immutable ownership box; NotificationCenter observer removal is thread-safe.
+/// This avoids keeping notification callbacks registered after an owner dies.
+private final class ScreenPollingObservation: @unchecked Sendable {
+    private let center: NotificationCenter
+    private let token: NSObjectProtocol
+    init(center: NotificationCenter, name: Notification.Name, handler: @escaping @Sendable (Notification) -> Void) {
+        self.center = center
+        token = center.addObserver(forName: name, object: nil, queue: .main, using: handler)
+    }
+    deinit { center.removeObserver(token) }
+}
+
+/// NSRunningApplication dynamic properties make synchronous LaunchServices
+/// queries. Cache the regular-app roster instead of querying every helper on
+/// every window poll. Lifecycle notifications invalidate it immediately; a
+/// bounded fallback also covers missed notifications/startup policy changes.
+@MainActor
+final class RunningApplicationCatalog {
+    static let shared = RunningApplicationCatalog()
+    struct Snapshot {
+        let applications: [NSRunningApplication]
+        let dockProcessID: pid_t?
+    }
+    private var cached = Snapshot(applications: [], dockProcessID: nil)
+    private var refreshPolicy = ApplicationCatalogRefreshPolicy()
+    private var observers: [ScreenPollingObservation] = []
+
+    private init() {
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.didActivateApplicationNotification, NSWorkspace.didWakeNotification] {
+            observers.append(ScreenPollingObservation(center: NSWorkspace.shared.notificationCenter, name: name) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.refreshPolicy.invalidate(launching: name == NSWorkspace.didLaunchApplicationNotification,
+                                                   now: ProcessInfo.processInfo.systemUptime)
+                }
+            })
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard refreshPolicy.shouldRefresh(now: now) else { return cached }
+        let running = NSWorkspace.shared.runningApplications
+        cached = Snapshot(applications: running.filter { $0.activationPolicy == .regular },
+                          dockProcessID: running.first { $0.bundleIdentifier == "com.apple.dock" }?.processIdentifier)
+        return cached
+    }
+}
+
+struct ScreenScalingSnapshot: Equatable {
     let displays: [ScalingDisplay]
     let applications: [pid_t: CGRect]
     let dockFrame: CGRect?
@@ -27,7 +76,7 @@ struct ScreenScalingSnapshot {
     @MainActor
     static func capture(includeOffscreen: Bool = false) -> Self {
         let displays = captureDisplays()
-        let dockPID = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == "com.apple.dock" }?.processIdentifier
+        let dockPID = RunningApplicationCatalog.shared.snapshot().dockProcessID
         let windows = CGWindowListCopyWindowInfo(includeOffscreen ? .optionAll : .optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
         var applications: [pid_t: CGRect] = [:]
         var dockFrames: [CGRect] = []
@@ -88,9 +137,12 @@ final class LiveDockSizeController {
         guard let getter, let setter else { return false }
         let points = min(max(points, 16), 128)
         let target = ScreenScalingPolicy.normalizedDockSize(points)
+        var current = getter()
         var changed = false
-        if abs(getter() - target) > 0.001 { setter(target, true); changed = true }
-        guard abs(getter() - target) < 0.001 else { return false }
+        if abs(current - target) > 0.001 {
+            setter(target, true); current = getter(); changed = true
+        }
+        guard abs(current - target) < 0.001 else { return false }
         // CoreDock's live tile setter alone can leave the persisted tilesize
         // unchanged. Keep the stored and live settings in agreement, although
         // this alone does not guarantee AppKit's work area has refreshed;
@@ -109,26 +161,74 @@ final class LiveDockSizeController {
 @MainActor
 final class ScreenScalingController {
     private var timer: Timer?
+    private var enabled = false
     private var stability = ScreenStabilityTracker()
     private var isPolling = false
+    private var cadence = ScreenPollingCadence()
+    private var previousSnapshot: ScreenScalingSnapshot?
+    private var workspaceObservers: [ScreenPollingObservation] = []
+    private var screenObserver: ScreenPollingObservation?
     var suspended = false
     var poll: ((ScreenScalingSnapshot, inout ScreenStabilityTracker) -> Void)?
 
+    init() {
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.didActivateApplicationNotification, NSWorkspace.didWakeNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
+            workspaceObservers.append(ScreenPollingObservation(center: NSWorkspace.shared.notificationCenter, name: name) { [weak self] _ in
+                MainActor.assumeIsolated { self?.wake() }
+            })
+        }
+        screenObserver = ScreenPollingObservation(center: .default, name: NSApplication.didChangeScreenParametersNotification) { [weak self] _ in
+            MainActor.assumeIsolated { self?.wake() }
+        }
+    }
+
     func setEnabled(_ enabled: Bool) {
-        guard enabled else { timer?.invalidate(); timer = nil; stability.reset(); return }
-        guard timer == nil else { return }
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+        guard self.enabled != enabled else { return }
+        self.enabled = enabled
+        guard enabled else {
+            timer?.invalidate(); timer = nil; stability.reset(); previousSnapshot = nil
+            return
+        }
+        wake()
+    }
+
+    private func schedule(after interval: TimeInterval) {
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, !self.suspended, !self.isPolling else { return }
-                self.isPolling = true
-                defer { self.isPolling = false }
-                self.poll?(ScreenScalingSnapshot.capture(), &self.stability)
+                self?.tick()
             }
         }
-        timer.tolerance = 0.2
+        timer.tolerance = interval >= 1 ? 0.3 : 0.1
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    func reset() { stability.reset() }
+    private func tick() {
+        timer = nil
+        guard enabled, !isPolling else { return }
+        guard !suspended else { schedule(after: 1.5); return }
+        isPolling = true
+        let interval = autoreleasepool { () -> TimeInterval in
+            let snapshot = ScreenScalingSnapshot.capture()
+            let changed = previousSnapshot != snapshot
+            previousSnapshot = snapshot
+            poll?(snapshot, &stability)
+            let interacting = CGEventSource.buttonState(.combinedSessionState, button: .left)
+                || CGEventSource.buttonState(.combinedSessionState, button: .right)
+            return cadence.interval(changed: changed, interacting: interacting, now: ProcessInfo.processInfo.systemUptime)
+        }
+        isPolling = false
+        if enabled && timer == nil { schedule(after: interval) }
+    }
+
+    func wake() {
+        cadence.wake(now: ProcessInfo.processInfo.systemUptime)
+        guard enabled, !isPolling else { return }
+        timer?.invalidate()
+        schedule(after: 0.05)
+    }
+
+    func reset() { stability.reset(); wake() }
 }

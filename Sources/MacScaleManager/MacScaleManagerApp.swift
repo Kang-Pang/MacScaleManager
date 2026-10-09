@@ -70,6 +70,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
 private struct MenuContent: View {
     @ObservedObject var manager: ScaleManager
+    @ObservedObject private var preferences: ManagedPreferences
+
+    init(manager: ScaleManager) {
+        self.manager = manager
+        self.preferences = manager.preferences
+    }
 
     var body: some View {
         Text("MacScaleManager")
@@ -92,6 +98,10 @@ private struct MenuContent: View {
         Button { manager.requestApply(.desktop) } label: {
             Label("Desktop Mode", systemImage: manager.currentMode == .desktop ? "checkmark.circle.fill" : "circle")
         }
+        Toggle("应用随屏幕自动缩放", isOn: Binding(
+            get: { preferences.automaticScreenScaling.applications },
+            set: { preferences.setAutomaticScreenScaling(applications: $0) }
+        ))
         Button("只调整当前应用窗口") { manager.syncFrontmostWindow() }
         Button("只调整当前应用字体/缩放") { manager.syncFrontmostScaling() }
         Menu("按屏幕自动缩放状态") {

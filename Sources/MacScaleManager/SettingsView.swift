@@ -37,7 +37,7 @@ struct SettingsView: View {
                     get: { preferences.automaticScreenScaling.allowsConfigurationRestart },
                     set: { preferences.setAutomaticScreenScaling(restartConfigurationApplications: $0) }
                 ))
-                Text("内置屏使用 Laptop 参数，外接屏使用 Desktop 参数。松开并停稳后同步。窗口布局列表中已启用的应用：比例模式只改大小、不主动移动；左侧留空模式按所选比例平铺，并按 Dock 实际边界避让。无 Dock 的屏幕填满菜单栏以下至屏幕底部。保留原生全屏，新启动窗口不自动调节。其他系统设置仍按手动模式。")
+                Text("内置屏使用 Laptop 参数，外接屏使用 Desktop 参数。菜单栏也可直接开关。MacScaleManager 启动或开启跟随后自动同步当前前台应用；新启动应用等待窗口稳定后同步。比例模式只改大小、不主动移动；左侧留空模式按比例平铺并避让 Dock，无 Dock 的屏幕填满至底部。保留原生全屏及最小化窗口。其他系统设置仍按手动模式。")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("即时规则只操作前台应用，后台应用激活后同步。Edge 等配置文件规则不使用页面快捷键：换屏后先在目标屏幕弹窗，确认重启后才正常退出、写入配置并重开；取消后不重复弹窗。退出被取消或超时则不修改、不强制关闭。关闭此选项后只显示等待。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -225,7 +225,7 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("窗口布局（不发送快捷键）") {
-                Text("手动切换模式后同步已运行的应用，新启动应用不自动调整。开启顶部的应用自动跟随后，比例模式的普通窗口换屏只改大小、不居中；左侧留空模式按下方比例平铺，并随 Dock 实际大小和位置更新。没有 Dock 的屏幕不保留底部 Dock 留白；原生全屏不动。“只调整当前应用窗口”可退出全屏并立即应用下方布局；字体/缩放操作不改变布局。")
+                Text("手动切换模式后同步已运行的应用。开启应用自动跟随后，启动本工具时同步当前前台应用，新启动应用也会自动同步；已有后台应用不在启动时批量重排。比例模式只改大小、不居中；左侧留空模式按下方比例平铺，并随 Dock 边界更新。原生全屏不动。“只调整当前应用窗口”可退出全屏并立即应用布局；字体/缩放操作不改变布局。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Picker("添加已安装应用", selection: $selectedWindowLayoutBundleID) {

@@ -18,8 +18,8 @@ func sample(_ frame: CGRect, id: UInt32 = 10, pid: Int32 = 100) -> FollowingWind
 }
 func step(_ policy: inout AutomaticWindowLayoutPolicy, _ frames: [FollowingWindowSample], _ now: Double,
           screens: [ScalingDisplay] = displays, rules: [Int32: FollowingWindowRule] = [100: rule],
-          down: Bool = false) -> [FollowingWindowRequest] {
-    policy.update(windows: frames, displays: screens, rules: rules, mouseDown: down, now: now)
+          down: Bool = false, initial: Set<Int32> = []) -> [FollowingWindowRequest] {
+    policy.update(windows: frames, displays: screens, rules: rules, mouseDown: down, now: now, initialSyncProcesses: initial)
 }
 
 var policy = AutomaticWindowLayoutPolicy()
@@ -249,3 +249,51 @@ _ = step(&backgroundTile, [sample(gap)], 3, screens: [laptopDockGrow, desktop], 
 check(step(&backgroundTile, [sample(gap)], 3.6, screens: [laptopDockGrow, desktop], rules: [100: gapRule]).count == 1,
       "unreadable background window must not consume the Dock transition")
 print("Background window sampling: \(checks - samplingStart) checks passed.")
+
+let initialStart = checks
+var startup = AutomaticWindowLayoutPolicy()
+check(step(&startup, [sample(normal)], 0, initial: [100]).isEmpty, "startup sync waits for stable window")
+let startupRequest = step(&startup, [sample(normal)], 0.6, initial: [100])
+check(startupRequest.count == 1, "startup foreground app syncs without a screen transition")
+check(startupRequest[0].preservePosition && startupRequest[0].targetFrame.origin == normal.origin,
+      "startup ordinary window keeps its position")
+check(startupRequest[0].targetFrame.size == CGSize(width: 1102, height: 650), "startup uses current-screen percentage")
+startup.complete(startupRequest[0], retry: false)
+_ = step(&startup, [sample(startupRequest[0].targetFrame)], 1, initial: [100])
+check(step(&startup, [sample(startupRequest[0].targetFrame)], 1.6, initial: [100]).isEmpty, "startup layout only runs once")
+_ = step(&startup, [sample(normal)], 2, initial: [100])
+check(step(&startup, [sample(normal)], 2.6, initial: [100]).isEmpty, "same-screen manual resize is not continually overwritten")
+var delayedLaunch = AutomaticWindowLayoutPolicy()
+_ = step(&delayedLaunch, [sample(normal)], 0)
+_ = step(&delayedLaunch, [sample(normal)], 0.6)
+check(step(&delayedLaunch, [sample(normal)], 2, initial: [100]).count == 1,
+      "launch delay expiry still synchronizes an already baselined window")
+var initialGap = AutomaticWindowLayoutPolicy()
+_ = step(&initialGap, [sample(normal)], 0, rules: [100: gapRule], initial: [100])
+let launchGap = step(&initialGap, [sample(normal)], 0.6, rules: [100: gapRule], initial: [100])
+check(launchGap.count == 1 && launchGap[0].targetFrame == gap && !launchGap[0].preservePosition,
+      "new tiled app adopts its configured left-gap fill immediately")
+initialGap.complete(launchGap[0], retry: true)
+check(step(&initialGap, [sample(normal)], 1, rules: [100: gapRule], initial: [100]).isEmpty,
+      "deferred initial request settles again")
+let launchRetry = step(&initialGap, [sample(normal)], 1.6, rules: [100: gapRule], initial: [100])
+check(launchRetry.count == 1, "temporary AX failure does not consume initial sync")
+initialGap.complete(launchRetry[0], retry: false)
+_ = step(&initialGap, [sample(launchRetry[0].targetFrame)], 2, rules: [100: gapRule], initial: [100])
+check(step(&initialGap, [sample(launchRetry[0].targetFrame)], 2.6, rules: [100: gapRule], initial: [100]).isEmpty,
+      "successful launch retry stops writing")
+var matchedInitial = AutomaticWindowLayoutPolicy()
+_ = step(&matchedInitial, [sample(gap)], 0, rules: [100: gapRule], initial: [100])
+check(step(&matchedInitial, [sample(gap)], 0.6, rules: [100: gapRule], initial: [100]).isEmpty,
+      "matching startup layout needs no AX write")
+_ = step(&matchedInitial, [sample(normal)], 1, rules: [100: gapRule], initial: [100])
+check(step(&matchedInitial, [sample(normal)], 1.6, rules: [100: gapRule], initial: [100]).isEmpty,
+      "matching initial layout is consumed once, not enforced on every frame")
+startup.reset()
+_ = step(&startup, [sample(normal)], 3, initial: [100])
+check(step(&startup, [sample(normal)], 3.6, initial: [100]).count == 1, "reenabling can sync current app again")
+var initialDrag = AutomaticWindowLayoutPolicy()
+check(step(&initialDrag, [sample(normal)], 0, down: true, initial: [100]).isEmpty, "initial sync never runs during drag")
+_ = step(&initialDrag, [sample(normal)], 1, initial: [100])
+check(step(&initialDrag, [sample(normal)], 1.6, initial: [100]).count == 1, "initial sync runs after release and settling")
+print("Startup/launch window synchronization: \(checks - initialStart) checks passed.")

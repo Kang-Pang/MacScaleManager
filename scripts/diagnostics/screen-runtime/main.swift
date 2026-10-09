@@ -31,9 +31,16 @@ controller.poll = { snapshot, stability in
 }
 controller.setEnabled(true)
 RunLoop.current.run(until: Date().addingTimeInterval(8))
+let idleCount = count
+// Local notification delivery only: does not switch a real Space or activate
+// an application. Verify the production observer wakes an idle one-shot timer.
+NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+precondition(count > idleCount, "workspace notification must wake an idle monitor promptly")
 controller.setEnabled(false)
 let stoppedCount = count
+NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
 RunLoop.current.run(until: Date().addingTimeInterval(1))
 precondition(count == stoppedCount, "disabled screen following must stop polling")
 if live { print("restored=\(dock.apply(points: original)) size=\(original)") }
-print("pollCount=\(count) disabledTimerStopped=true")
+print("pollCount=\(count) idleNotificationWake=true disabledTimerStopped=true")

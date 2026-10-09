@@ -64,8 +64,8 @@ struct FollowingWindowRequest {
     }
 }
 
-/// Pure Quartz-coordinate policy. No AX calls on idle polls; first sight of a
-/// window is a baseline, never an instruction to resize a newly launched app.
+/// Pure Quartz-coordinate policy. Existing background windows establish a
+/// baseline; explicitly scheduled startup/launch syncs run once per process.
 struct AutomaticWindowLayoutPolicy {
     private struct Key: Hashable {
         let processID: Int32
@@ -85,13 +85,21 @@ struct AutomaticWindowLayoutPolicy {
     private var states: [Key: State] = [:]
     private var candidates: [Key: (Candidate, TimeInterval)] = [:]
     private var previousStates: [Key: State] = [:]
+    private var initiallySynchronizedProcesses: Set<Int32> = []
+    private var initialRequests: Set<Key> = []
 
-    mutating func reset() { states.removeAll(); candidates.removeAll(); previousStates.removeAll() }
+    mutating func reset() {
+        states.removeAll(); candidates.removeAll(); previousStates.removeAll()
+        initiallySynchronizedProcesses.removeAll(); initialRequests.removeAll()
+    }
 
     /// A Dock animation or a last-moment move invalidated the request between
     /// sampling and AX. Preserve the original transition and settle again.
     mutating func complete(_ request: FollowingWindowRequest, retry: Bool) {
         let key = Key(request.window)
+        if initialRequests.remove(key) != nil, retry {
+            initiallySynchronizedProcesses.remove(request.window.processID)
+        }
         if let previous = previousStates.removeValue(forKey: key), retry {
             states[key] = previous
             candidates.removeValue(forKey: key)
@@ -100,9 +108,10 @@ struct AutomaticWindowLayoutPolicy {
 
     mutating func update(windows: [FollowingWindowSample], displays: [ScalingDisplay],
                          rules: [Int32: FollowingWindowRule], mouseDown: Bool,
-                         now: TimeInterval) -> [FollowingWindowRequest] {
+                         now: TimeInterval, initialSyncProcesses: Set<Int32> = []) -> [FollowingWindowRequest] {
         var requests: [FollowingWindowRequest] = []
         previousStates.removeAll()
+        initialRequests.removeAll()
         var liveKeys = Set<Key>()
         for window in windows {
             guard let rule = rules[window.processID],
@@ -119,11 +128,12 @@ struct AutomaticWindowLayoutPolicy {
                 continue
             }
             guard now - pending.1 >= 0.5 else { continue }
-            guard let previous = states[key] else {
-                states[key] = State(frame: window.frame, display: display,
-                                    kind: Self.kind(frame: window.frame, display: display, rule: rule), lastSeen: now)
-                continue
-            }
+            let initialSync = initialSyncProcesses.contains(window.processID)
+                && !initiallySynchronizedProcesses.contains(window.processID)
+            let baseline = State(frame: window.frame, display: display,
+                                 kind: Self.kind(frame: window.frame, display: display, rule: rule), lastSeen: now)
+            let previous = states[key] ?? baseline
+            if states[key] == nil && !initialSync { states[key] = baseline; continue }
             let changedScreen = previous.display.id != display.id
             let changedArea = previous.display.usableFrame != display.usableFrame || previous.display.frame != display.frame
             let currentKind = Self.kind(frame: window.frame, display: display, rule: rule)
@@ -138,13 +148,15 @@ struct AutomaticWindowLayoutPolicy {
                     || currentKind == previous.kind { kind = previous.kind }
             }
             states[key] = State(frame: window.frame, display: display, kind: kind, lastSeen: now)
-            guard changedScreen || (changedArea && kind != .ordinary) else { continue }
+            guard initialSync || changedScreen || (changedArea && kind != .ordinary) else { continue }
+            if initialSync { initiallySynchronizedProcesses.insert(window.processID) }
             let target = Self.targetFrame(current: window.frame, display: display, kind: kind, rule: rule)
             // Consume the transition even if AX rejects it: no repeated writes
             // every timer tick. Another real screen/area transition may retry.
             states[key]?.frame = target
             guard !Self.nearlyEqual(window.frame, target, tolerance: 1) else { continue }
             previousStates[key] = previous
+            if initialSync { initialRequests.insert(key) }
             requests.append(FollowingWindowRequest(window: window, display: display,
                                                    targetFrame: target, preservePosition: kind == .ordinary))
         }
@@ -153,6 +165,7 @@ struct AutomaticWindowLayoutPolicy {
         // their baseline until the app exits or its rule is disabled. A fixed
         // LRU bound also covers closed windows without another CG/AX poll.
         states = states.filter { rules[$0.key.processID] != nil }
+        initiallySynchronizedProcesses = initiallySynchronizedProcesses.filter { rules[$0] != nil }
         if states.count > 256 {
             states = Dictionary(uniqueKeysWithValues: states.sorted { $0.value.lastSeen > $1.value.lastSeen }
                 .prefix(256).map { ($0.key, $0.value) })

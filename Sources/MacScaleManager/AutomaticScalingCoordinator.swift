@@ -26,6 +26,15 @@ final class AutomaticScalingCoordinator {
     private var applicationStatuses: [String: String] = [:]
     private var lastDockStatus = "等待识别 Dock 所在屏幕"
     private let startedAt = Date()
+    private var applicationsEnabled = false
+    private var observedProcesses: [pid_t: String] = [:]
+    private var initialSynchronizationProcesses: Set<pid_t> = []
+    private var initialFontSyncTokens: Set<String> = []
+    private var configurationTargets: [ScreenConfigurationTarget] = []
+    private var shortcutTargets: [String: CustomImmediateApp] = [:]
+    private var layoutRules: [String: FollowingWindowRule] = [:]
+    private var laptopConfigurationSignature = ""
+    private var desktopConfigurationSignature = ""
     var statusChanged: ((String) -> Void)?
     var stopped = false
 
@@ -42,15 +51,46 @@ final class AutomaticScalingCoordinator {
     func configure() {
         guard !stopped else { return }
         let options = preferences.automaticScreenScaling
+        configurationTargets = preferences.screenConfigurationTargets
+        shortcutTargets.removeAll(keepingCapacity: true)
+        if preferences.immediateMode {
+            for adapter in preferences.configuredImmediateAdapters where adapter.isEnabled && shortcutTargets[adapter.bundleIdentifier] == nil {
+                shortcutTargets[adapter.bundleIdentifier] = adapter.asImmediateApp()
+            }
+        }
+        layoutRules.removeAll(keepingCapacity: true)
+        for adapter in preferences.configuredWindowLayoutAdapters where adapter.isEnabled && layoutRules[adapter.bundleIdentifier] == nil {
+            layoutRules[adapter.bundleIdentifier] = FollowingWindowRule(sizeFraction: adapter.sizeFraction,
+                leftGapFraction: adapter.style == .fillWithLeftGap ? adapter.leftGapFraction : nil)
+        }
+        laptopConfigurationSignature = "laptop:\(fingerprint(preferences.laptopProfile))"
+        desktopConfigurationSignature = "desktop:\(fingerprint(preferences.desktopProfile))"
+        if options.applications && !applicationsEnabled {
+            observedProcesses = Dictionary(uniqueKeysWithValues: RunningApplicationCatalog.shared.snapshot().applications
+                .map { ($0.processIdentifier, token($0)) })
+            if let app = NSWorkspace.shared.frontmostApplication,
+               app.activationPolicy == .regular, app.bundleIdentifier != Bundle.main.bundleIdentifier {
+                scheduleInitialSynchronization(app)
+            }
+        }
+        applicationsEnabled = options.applications
         if !options.applications || !options.allowsConfigurationRestart { restartConfirmation?.dismiss() }
         monitor.setEnabled(options.applications || (options.dock && preferences.isManagedApplicationEnabled("dock")))
-        if !options.applications { applicationStatuses.removeAll(); windowFollowing.reset(); windowSampler.reset() }
+        if !options.applications {
+            applicationStatuses.removeAll(); windowFollowing.reset(); windowSampler.reset()
+            initialSynchronizationProcesses.removeAll(); initialFontSyncTokens.removeAll()
+        }
         publishStatus()
     }
 
     func suspend() { monitor.suspended = true }
     func resume() { monitor.reset(); monitor.suspended = false; configured.removeAll(); configurationChecks.removeAll(); knownConfigurationProfiles.removeAll() }
     func stop() { stopped = true; monitor.setEnabled(false); restartConfirmation?.dismiss() }
+
+    private func scheduleInitialSynchronization(_ app: NSRunningApplication) {
+        initialSynchronizationProcesses.insert(app.processIdentifier)
+        initialFontSyncTokens.insert(token(app))
+    }
 
     func recordManual(mode: ScaleMode, bundleIdentifiers: [String]) {
         for app in NSWorkspace.shared.runningApplications {
@@ -90,8 +130,8 @@ final class AutomaticScalingCoordinator {
     }
 
     private func poll(_ snapshot: ScreenScalingSnapshot, stability: inout ScreenStabilityTracker) {
-        let running = NSWorkspace.shared.runningApplications
-        let liveTokens = Set(running.filter { $0.activationPolicy == .regular }.map(token))
+        let running = RunningApplicationCatalog.shared.snapshot().applications
+        let liveTokens = Set(running.map(token))
         configured = configured.filter { liveTokens.contains($0.key) }
         configurationChecks = configurationChecks.filter { liveTokens.contains($0.key) }
         shortcuts = shortcuts.filter { liveTokens.contains($0.key) }
@@ -107,6 +147,16 @@ final class AutomaticScalingCoordinator {
         let now = ProcessInfo.processInfo.systemUptime
         var candidateKeys = Set<String>()
         let options = preferences.automaticScreenScaling
+
+        let regular = running
+        if options.applications {
+            for app in regular where observedProcesses[app.processIdentifier] != token(app) {
+                scheduleInitialSynchronization(app)
+            }
+        }
+        observedProcesses = Dictionary(uniqueKeysWithValues: regular.map { ($0.processIdentifier, token($0)) })
+        initialSynchronizationProcesses.formIntersection(Set(observedProcesses.keys))
+        initialFontSyncTokens.formIntersection(liveTokens)
 
         if options.dock && preferences.isManagedApplicationEnabled("dock") {
             if let frame = snapshot.dockFrame,
@@ -134,17 +184,21 @@ final class AutomaticScalingCoordinator {
             // settled display/work-area transition, never on every idle poll.
             var windowRules: [Int32: FollowingWindowRule] = [:]
             var windowApps: [Int32: NSRunningApplication] = [:]
-            for app in running where app.activationPolicy == .regular {
+            for app in running {
                 guard let id = app.bundleIdentifier, id != pendingRestartBundleID,
-                      let adapter = preferences.configuredWindowLayoutAdapters.first(where: { $0.bundleIdentifier == id && $0.isEnabled }) else { continue }
-                windowRules[app.processIdentifier] = FollowingWindowRule(sizeFraction: adapter.sizeFraction,
-                    leftGapFraction: adapter.style == .fillWithLeftGap ? adapter.leftGapFraction : nil)
+                      let rule = layoutRules[id] else { continue }
+                windowRules[app.processIdentifier] = rule
                 windowApps[app.processIdentifier] = app
             }
             let layoutBlocked = mouseDown || modifierDown || now < dockLayoutNotBefore || !snapshot.layoutWorkAreaStable
             let realWindows = windowSampler.sample(applications: windowApps, snapshot: snapshot, blocked: layoutBlocked, now: now)
+            let readyInitialProcesses = initialSynchronizationProcesses.filter { pid in
+                guard let app = windowApps[pid] else { return false }
+                let delay = app.bundleIdentifier.flatMap { shortcutTargets[$0] }?.desktopLaunchDelay ?? 2
+                return app.launchDate.map { Date().timeIntervalSince($0) >= delay } ?? true
+            }
             let requests = windowFollowing.update(windows: realWindows, displays: snapshot.displays,
-                rules: windowRules, mouseDown: layoutBlocked, now: now)
+                rules: windowRules, mouseDown: layoutBlocked, now: now, initialSyncProcesses: readyInitialProcesses)
             for request in requests {
                 guard let app = windowApps[request.window.processID] else { continue }
                 let name = app.localizedName ?? app.bundleIdentifier ?? "应用"
@@ -167,13 +221,13 @@ final class AutomaticScalingCoordinator {
                 }
                 windowFollowing.complete(request, retry: retry)
             }
-            let targets = preferences.screenConfigurationTargets
-            for app in running where app.activationPolicy == .regular {
+            let targets = configurationTargets
+            for app in running {
                 guard let id = app.bundleIdentifier, let frame = snapshot.applications[app.processIdentifier],
                       let display = ScreenScalingPolicy.display(for: frame, displays: snapshot.displays) else { continue }
                 let key = token(app)
                 if id == pendingRestartBundleID { continue }
-                let target = preferences.automaticShortcutTarget(bundleIdentifier: id)
+                let target = shortcutTargets[id]
                 let configuration = targets.first { $0.bundleIdentifier == id }
                 guard target != nil || configuration != nil else { continue }
                 candidateKeys.insert(key)
@@ -191,10 +245,16 @@ final class AutomaticScalingCoordinator {
                     }
                     let age = app.launchDate.map { Date().timeIntervalSince($0) } ?? 100
                     guard age >= target.desktopLaunchDelay else { continue }
+                    if initialFontSyncTokens.remove(key) != nil,
+                       target.resetBeforeDesktop == true, target.laptopAction == .reset {
+                        // Startup/enable sync repairs resettable foreground zoom
+                        // even if a saved signature says it was already applied.
+                        // Unknown relative zoom is never guessed or compounded.
+                        shortcuts.removeValue(forKey: key)
+                    }
                     applicationStatuses[id] = synchronize(app, target: target, mode: mode, explicit: false)
                 } else if let configuration {
-                    let profile = mode == .desktop ? preferences.desktopProfile : preferences.laptopProfile
-                    let signature = "\(mode.rawValue):\(fingerprint(profile))"
+                    let signature = mode == .desktop ? desktopConfigurationSignature : laptopConfigurationSignature
                     if suppressedRestarts[id] != signature { suppressedRestarts.removeValue(forKey: id) }
                     if knownConfigurationProfiles[id] == signature { configured[key] = signature }
                     guard configured[key] != signature else { continue }

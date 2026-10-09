@@ -8,6 +8,33 @@ struct AutomaticScreenScaling: Codable, Equatable {
     var allowsConfigurationRestart: Bool { restartConfigurationApplications ?? false }
 }
 
+/// Keep the original settling cadence during activity without paying for two
+/// full application/window scans every second throughout an idle session.
+struct ScreenPollingCadence {
+    private var activeUntil: TimeInterval = 0
+    mutating func wake(now: TimeInterval) { activeUntil = now + 5 }
+    mutating func interval(changed: Bool, interacting: Bool, now: TimeInterval) -> TimeInterval {
+        if changed || interacting { wake(now: now) }
+        return now < activeUntil ? 0.5 : 1.5
+    }
+}
+
+struct ApplicationCatalogRefreshPolicy {
+    private var dirty = true
+    private var lastRefresh: TimeInterval = -.infinity
+    private var launchingUntil: TimeInterval = -.infinity
+    mutating func invalidate(launching: Bool, now: TimeInterval) {
+        dirty = true
+        if launching { launchingUntil = now + 3 }
+    }
+    mutating func shouldRefresh(now: TimeInterval) -> Bool {
+        let interval: TimeInterval = now < launchingUntil ? 0.5 : 10
+        guard dirty || now - lastRefresh >= interval else { return false }
+        dirty = false; lastRefresh = now
+        return true
+    }
+}
+
 /// All frames use Quartz desktop coordinates, including displays above/left
 /// of the primary display. No mouse-position or main-screen guessing.
 struct ScalingDisplay: Equatable {
